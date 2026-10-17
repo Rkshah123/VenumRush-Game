@@ -1,0 +1,1370 @@
+# MASTER GAME DEVELOPMENT PROMPT — SERPENTIS 3D
+
+## YOUR ROLE
+
+Act as a senior AAA game development team consisting of:
+
+- Lead 3D game developer
+- Gameplay and physics engineer
+- 3D character and environment artist
+- UI/UX designer
+- Animation and VFX specialist
+- AI gameplay engineer
+- Multiplayer and networking engineer
+- Audio designer
+- Android and desktop build engineer
+- QA and performance engineer
+
+Your mission is to design, implement, test, and package a complete, polished, genuinely playable 3D snake-arena game called **SERPENTIS 3D**.
+
+Do not create merely a concept, mockup, landing page, static UI, or incomplete prototype. Build the real game with functional gameplay, menus, animations, enemy AI, saving, sound, settings, offline modes, online architecture, and export configurations.
+
+Work directly in the available project environment. Inspect the computer's installed development tools, project files, available storage, and supported build targets before making technical decisions. Use available resources responsibly and request permission when elevated permissions, external accounts, paid services, or consequential actions require it.
+
+Do not claim that a feature works unless it has been implemented and tested.
+
+---
+
+# 1. GAME VISION
+
+Create an original, premium-quality 3D snake survival and combat game inspired by the general appeal of modern arena survival, snake growth, creature battles, and competitive multiplayer games.
+
+The player controls a living, animated snake inside a large, visually spectacular 3D arena.
+
+The player must:
+
+1. Explore the arena.
+2. Collect glowing energy orbs and special food.
+3. Grow longer, stronger, and more visually impressive.
+4. Fight against intelligent enemy snakes.
+5. Avoid collisions with dangerous enemies and arena hazards.
+6. Eliminate rival snakes using positioning, tactical movement, and special abilities.
+7. Collect rewards and unlock new skins, trails, arenas, and upgrades.
+8. Survive for as long as possible and achieve a high score.
+9. Compete against bots offline or real players online when connected.
+10. Restart quickly after defeat and immediately enter another match.
+
+The experience should feel fast, satisfying, competitive, atmospheric, and highly replayable.
+
+Create an original visual identity. Do not copy another game's name, characters, assets, interface, or proprietary designs.
+
+## Game identity
+
+- Title: SERPENTIS 3D
+- Tagline: Evolve. Hunt. Dominate.
+- Genre: 3D snake arena survival and action
+- Primary platforms: Windows desktop and Android
+- Additional target: Linux and macOS where practical
+- Rendering: real-time 3D
+- Perspective: third-person chase camera
+- Game modes: offline single-player and online multiplayer
+- Primary audience: casual and competitive players
+- Visual style: premium stylized realism, cinematic lighting, polished materials, expressive motion, and readable gameplay
+
+---
+
+# 2. TECHNICAL ARCHITECTURE
+
+Use Godot 4.x with GDScript as the primary engine and programming language unless a verified environmental limitation makes another native 3D engine a clearly better choice.
+
+Prefer a single, maintainable Godot project for desktop and Android.
+
+Use appropriate engine-native systems for:
+
+- 3D rendering
+- Scene management
+- Animation
+- Physics and collision detection
+- Input mapping
+- Audio
+- UI layout
+- Resource loading
+- Local persistence
+- Networking
+- Platform exports
+
+Use a modular architecture. Do not put the entire game in one enormous script.
+
+Create separate modules for:
+
+- Application and scene flow
+- Main menu
+- Gameplay and match state
+- Snake controller
+- Snake body simulation
+- Snake appearance and customization
+- Food and collectible spawning
+- Enemy AI
+- Arena generation
+- Camera
+- Collision and elimination
+- Score and progression
+- Special abilities
+- Audio and music
+- UI and HUD
+- Settings
+- Save data
+- Offline game modes
+- Multiplayer session management
+- Network synchronization
+- Platform-specific controls
+- Build and release tooling
+
+Use typed GDScript where practical, meaningful class and function names, signals for communication, reusable scenes, and centralized configuration.
+
+Avoid circular dependencies, unnecessary global singletons, hardcoded resource paths scattered across scripts, excessive per-frame allocations, and duplicated gameplay logic.
+
+Maintain a clear distinction between authoritative game state, visual effects, user interface, local simulation, and online server state.
+
+Document important architectural decisions in the repository.
+
+---
+
+# 3. TRUE 3D SNAKE GAMEPLAY
+
+This must be a genuinely three-dimensional game.
+
+## Snake construction
+
+Build snakes using procedural geometry, reusable 3D segments, a tube mesh, or another efficient method that produces a continuous, rounded body.
+
+Each snake should have:
+
+- A distinctive head
+- Expressive eyes
+- A mouth or stylized facial details
+- A smooth neck transition
+- A flexible body with many visible segments
+- A tapered tail
+- Material variation
+- Individual markings or scales
+- Emissive accents
+- Smooth movement and turning
+- A visible growth response when consuming food
+
+The body must follow the head's movement naturally.
+
+Use a robust body-following system based on sampled path positions, a distance-spaced point history, or a suitable spline-based technique.
+
+Maintain consistent segment spacing while the snake turns.
+
+Prevent body jitter, segment overlap, sudden teleportation, visible gaps, and excessive stretching.
+
+The snake must not behave like a rigid chain of unrelated spheres.
+
+Provide a procedural fallback if external 3D models are unavailable. The game must remain playable without paid assets or inaccessible downloads.
+
+## Movement
+
+Implement:
+
+- Smooth acceleration and deceleration
+- Adjustable movement speed
+- Responsive steering
+- Natural turning
+- A configurable turning radius
+- Head tilt during turns
+- Body lag and follow-through
+- Subtle idle movement
+- Animated tongue or head details where appropriate
+- Temporary speed boosts
+- Recovery after boosting
+- Camera smoothing
+- Reliable collision detection
+
+Use frame-rate-independent movement and stable simulation steps where needed.
+
+Support keyboard, mouse, and touch controls without requiring different gameplay rules for each platform.
+
+## Growth
+
+Food consumption must have immediate visual and gameplay consequences.
+
+When the player eats:
+
+- Increase score.
+- Increase length.
+- Add or redistribute body segments.
+- Update the length indicator.
+- Play a satisfying sound.
+- Trigger a brief visual effect.
+- Spawn a small particle burst.
+- Produce a subtle camera response.
+- Update any relevant achievements or mission progress.
+
+Growth must be bounded by performance safeguards without making long snakes visually broken.
+
+Create configurable minimum and maximum length values.
+
+## Collision and elimination
+
+Implement consistent collision rules for:
+
+- Snake heads
+- Snake bodies
+- Food
+- Arena boundaries
+- Hazards
+- Enemy attacks or special abilities
+
+Use appropriate spatial partitioning or collision-query optimization for large numbers of segments.
+
+Define the rules explicitly.
+
+For example, a head-first collision with another snake's body may eliminate the attacking snake, while contact with food grants growth.
+
+Allow special combat abilities to modify specific collision outcomes, but never create arbitrary, unexplained invulnerability.
+
+On elimination:
+
+1. Stop the eliminated snake's movement.
+2. Trigger a short, readable death animation.
+3. Convert part of its mass into collectible energy orbs.
+4. Play the elimination sound.
+5. Update scores and kill statistics.
+6. Inform the HUD.
+7. Show the game-over screen when the player dies.
+8. Allow immediate restart or return to the menu.
+
+All collision and elimination rules must be testable and consistent.
+
+---
+
+# 4. THE 3D ARENA
+
+Create a visually rich, fully playable arena with a clear navigable space.
+
+Include:
+
+- A large circular, hexagonal, or organically shaped battlefield
+- A distant skybox or atmospheric environment
+- A detailed floor with subtle surface patterns
+- Decorative structures
+- Rocks and crystalline formations
+- Glowing plants or energy objects
+- Floating particles
+- Animated environmental elements
+- Distant scenery
+- Arena boundaries
+- Clearly visible danger zones
+- Environmental lighting and shadows
+
+The environment should be attractive without distracting players from snake movement, food, and enemy collisions.
+
+Use multiple original arena themes.
+
+### Arena A: Neon Abyss
+
+A dark futuristic arena with cyan and violet energy, reflective surfaces, glowing crystal structures, and atmospheric fog.
+
+### Arena B: Emerald Wilds
+
+A bioluminescent alien forest with luminous vegetation, green energy orbs, mossy surfaces, and organic architecture.
+
+### Arena C: Volcanic Rift
+
+A dangerous volcanic landscape with molten cracks, embers, red-orange lighting, and dramatic environmental effects.
+
+### Arena D: Frozen Expanse
+
+An icy arena with crystalline structures, cool lighting, drifting snow particles, and reflective frozen surfaces.
+
+### Arena E: Cosmic Void
+
+A space-inspired arena with floating fragments, distant stars, nebula-like scenery, and glowing energy pathways.
+
+Make arenas visually distinct while preserving fair collision rules and readable gameplay.
+
+Implement an original arena first, then add other arenas as fully playable variations.
+
+Do not leave arena selection as nonfunctional buttons.
+
+---
+
+# 5. FOOD, COLLECTIBLES, AND REWARDS
+
+Create several collectible types.
+
+### Basic energy orb
+
+- Common
+- Small
+- Bright and clearly visible
+- Grants a small amount of growth
+
+### Rare energy orb
+
+- Less common
+- Larger and more visually attractive
+- Grants additional growth or score
+
+### Golden orb
+
+- Valuable
+- Distinct gold appearance
+- Creates a rewarding pickup animation
+
+### Power orb
+
+Grants a temporary special ability or a boost to an existing ability.
+
+### Defeated-snake remains
+
+When an enemy is eliminated, generate a controlled quantity of collectible orbs based on its size and the game rules.
+
+Avoid excessive object spawning and performance degradation.
+
+## Special abilities
+
+Implement a balanced initial ability set:
+
+- **Turbo Surge:** temporarily increases movement speed.
+- **Phase Dash:** provides a brief, clearly communicated defensive or movement effect, with appropriate cooldowns.
+- **Magnet Pulse:** attracts nearby collectibles for a short period.
+- **Shockwave:** creates a visual pulse and a carefully balanced gameplay effect.
+- **Shield:** temporarily protects against one defined class of threat, if balance testing supports it.
+
+Every ability must have:
+
+- A working implementation
+- An activation input
+- An icon
+- A cooldown indicator
+- A duration indicator when applicable
+- Visual and audio feedback
+- Clearly defined restrictions
+- Appropriate AI or multiplayer handling
+
+If the full ability set threatens the quality of the core game, complete and test a smaller set before adding more.
+
+---
+
+# 6. ENEMY SNAKES AND AI
+
+Populate offline matches with multiple rival snakes.
+
+Create several distinct AI personalities.
+
+### Aggressive Hunter
+
+Actively seeks opportunities to attack and eliminate the player.
+
+### Opportunistic Scavenger
+
+Collects nearby food and moves toward valuable dropped rewards.
+
+### Defensive Survivor
+
+Avoids unnecessary fights and prioritizes survival.
+
+### Territorial Guardian
+
+Defends a preferred area or valuable resource.
+
+### Speed Demon
+
+Moves aggressively, uses speed bursts, and takes calculated risks.
+
+### Elite Rival
+
+Uses stronger path planning, better threat assessment, and more advanced tactics.
+
+### Boss Serpent
+
+A large, visually distinctive enemy with a special behavior pattern, a health or phase system where appropriate, and a dramatic encounter.
+
+AI should use a combination of:
+
+- Food seeking
+- Obstacle avoidance
+- Threat assessment
+- Player tracking
+- Path prediction
+- Escape behavior
+- Target selection
+- Collision avoidance
+- Opportunistic combat
+- Speed management
+- Safe-route selection
+
+Use finite-state machines, behavior trees, or another understandable AI architecture.
+
+Do not make every enemy follow the player constantly.
+
+Enemies should have readable movement and recognizable personalities. Avoid unfair attacks, perfect omniscience, impossible reaction times, and artificial rubber-banding.
+
+Create configurable difficulty levels:
+
+- Easy
+- Normal
+- Hard
+- Expert
+
+Difficulty should affect sensible AI parameters rather than simply granting arbitrary advantages.
+
+Add adjustable enemy counts to support different hardware.
+
+Provide a stable initial offline match with multiple AI snakes. Expand the count only after performance testing.
+
+---
+
+# 7. COMPLETE HOME SCREEN AND NAVIGATION
+
+The interface is a first-class part of the game.
+
+Design a coherent premium interface with consistent typography, spacing, colors, icons, animation timing, and interaction feedback.
+
+Use a dark futuristic visual language with tasteful neon accents, translucent panels, subtle gradients, and readable contrast.
+
+Avoid clutter, tiny text, oversized panels, overlapping buttons, excessive glow, and distracting animations.
+
+Create an animated 3D snake or arena scene behind the main menu.
+
+## Main menu
+
+Display:
+
+- Original game logo
+- Game title
+- Animated 3D background
+- Play button
+- Online Multiplayer button
+- Offline Mode button
+- Game Modes button
+- Snake Customization button
+- Arena Selection button
+- Missions and Rewards button
+- Leaderboards button
+- Profile and Statistics button
+- Settings button
+- How to Play button
+- Credits button
+- Exit button on supported desktop platforms
+
+Include subtle animation, hover effects, pressed states, keyboard focus, and touch feedback.
+
+Every button must have a defined action.
+
+Do not show fake notifications, fake online players, or fabricated leaderboard results.
+
+If a feature requires an unfinished backend, provide an honest unavailable or setup state rather than pretending it works.
+
+## Navigation
+
+Every secondary page must include a consistent back-navigation control.
+
+Support:
+
+- Back button
+- Escape key on desktop
+- Appropriate Android back behavior
+- Confirmation before discarding important changes
+- Preservation of appropriate settings and progress
+- Safe return to the correct previous screen
+
+Avoid navigation dead ends.
+
+Use a centralized navigation system or an equally reliable architecture.
+
+## Screen inventory
+
+Implement these screens:
+
+1. Splash screen
+2. Loading screen
+3. First-launch onboarding
+4. Main menu
+5. Mode selection
+6. Offline match setup
+7. Online lobby
+8. Matchmaking
+9. Gameplay HUD
+10. Pause menu
+11. Game-over screen
+12. Victory screen
+13. Snake customization
+14. Skin selection
+15. Trail selection
+16. Arena selection
+17. Missions and rewards
+18. Daily reward interface
+19. Leaderboards
+20. Player profile
+21. Statistics
+22. Settings
+23. Audio settings
+24. Graphics settings
+25. Control settings
+26. Accessibility settings
+27. How-to-play tutorial
+28. Credits
+29. Network error screen
+30. Reconnection screen
+31. Exit confirmation
+32. Error and recovery dialogs
+
+Make each screen functional, responsive, and visually consistent.
+
+---
+
+# 8. GAMEPLAY HUD
+
+The HUD must remain readable while the player is moving and fighting.
+
+Display:
+
+- Current score
+- Snake length
+- Current rank where meaningful
+- Elimination count
+- Match timer
+- Active ability buttons
+- Ability cooldowns
+- Boost status
+- Pause button
+- Mini-map or arena awareness indicator if useful
+- Mission progress when relevant
+
+Show notifications for:
+
+- Food collected
+- Level or milestone reached
+- Enemy eliminated
+- New personal best
+- Ability activated
+- Temporary bonus earned
+- Match ending
+
+Use subtle animations that do not obstruct essential gameplay.
+
+Make the HUD adapt to different resolutions, aspect ratios, safe areas, and mobile screen sizes.
+
+Do not stretch the game to fit the screen. Use proper anchors, containers, scalable layouts, and appropriate viewport settings.
+
+---
+
+# 9. GAME MODES
+
+Implement and test the following modes.
+
+## Classic Survival
+
+Collect food, grow, avoid collisions, eliminate enemies, and survive as long as possible.
+
+## Arena Battle
+
+Compete against multiple AI snakes with a match timer, scoring rules, and a defined victory condition.
+
+## Endless Growth
+
+Play an extended survival session focused on growth and personal bests.
+
+## Time Attack
+
+Earn as much score as possible before the timer expires.
+
+## Boss Hunt
+
+Face a powerful AI-controlled boss serpent with readable attack patterns and a defined win condition.
+
+## Challenge Mode
+
+Complete objectives such as:
+
+- Collect a target number of orbs.
+- Survive for a specified duration.
+- Reach a particular length.
+- Eliminate a specified number of rivals.
+- Win without using a special ability.
+
+Use configurable mission data.
+
+Where practical, support optional daily challenges generated from deterministic seeds.
+
+## Local Practice
+
+Provide a safe environment for learning movement, testing abilities, and practicing without competitive pressure.
+
+Every advertised mode must launch into actual gameplay.
+
+If a mode is not ready, do not present it as a finished feature.
+
+---
+
+# 10. PAUSE, DEATH, VICTORY, AND RESTART
+
+## Pause menu
+
+Include:
+
+- Resume
+- Restart Match
+- Settings
+- Controls
+- Return to Main Menu
+
+Freeze the appropriate gameplay systems during offline pause.
+
+Do not pause the shared world globally in an online match. Instead, implement a local pause overlay that does not stop the server or other players.
+
+## Game-over sequence
+
+When the player dies:
+
+1. Play a short elimination animation.
+2. Apply a brief, controlled camera effect.
+3. Display a clear game-over heading.
+4. Show the final score.
+5. Show the final length.
+6. Show survival time.
+7. Show eliminations.
+8. Show rank or placement when available.
+9. Show best-score comparison.
+10. Present Restart, Main Menu, and relevant sharing or statistics actions.
+
+Restart should be fast and reliable.
+
+Reset every necessary match variable, remove old entities, clear temporary effects, restore the player, reset the camera, restart timers, and recreate food and enemies.
+
+Prevent duplicate event connections, stale references, duplicated snakes, and accumulating memory usage after repeated restarts.
+
+## Victory screen
+
+Provide a satisfying victory animation, results summary, earned rewards, and clear next actions.
+
+---
+
+# 11. SNAKE CUSTOMIZATION AND PROGRESSION
+
+Build a complete customization system.
+
+Allow players to select:
+
+- Snake body color
+- Head appearance
+- Body pattern
+- Material finish
+- Eye style
+- Emissive color
+- Trail effect
+- Elimination effect
+- Cosmetic accessories where appropriate
+
+Create original cosmetic sets such as:
+
+- Neon Circuit
+- Emerald Phantom
+- Solar Serpent
+- Frostbite
+- Crimson Inferno
+- Cosmic Warden
+- Shadow Venom
+- Golden Monarch
+- Crystal Guardian
+- Electric Storm
+
+Use a data-driven catalog.
+
+Each cosmetic must have an actual visible implementation, not just a name in a list.
+
+Include:
+
+- Unlock conditions
+- Preview rotation
+- Selection state
+- Locked state
+- Equipped state
+- Currency cost where applicable
+- Persistence after restarting the application
+
+Create a progression system with experience, levels, achievements, and cosmetic unlocks.
+
+Use earned in-game currency and non-pay-to-win progression. Do not introduce real-money purchases unless explicitly requested and separately designed.
+
+Keep competitive gameplay fair. Cosmetics must not secretly change hitboxes or provide unfair combat advantages.
+
+---
+
+# 12. CAMERA AND CINEMATIC PRESENTATION
+
+Implement a high-quality third-person camera.
+
+The camera should:
+
+- Follow the player smoothly
+- Keep the head visible
+- Look ahead in the movement direction
+- Adjust distance based on snake length and gameplay needs
+- Avoid clipping through arena geometry
+- Maintain a useful view of nearby threats
+- Adapt to different screen aspect ratios
+- Avoid motion sickness and excessive shaking
+
+Add optional camera settings for:
+
+- Sensitivity
+- Camera distance
+- Camera smoothing
+- Camera shake
+- Field of view where supported
+- Invert camera controls where applicable
+
+Use restrained cinematic effects for:
+
+- Match start
+- Boss introduction
+- Rare pickups
+- Major eliminations
+- Victory
+- Game over
+
+Do not interrupt player control with long unskippable sequences.
+
+---
+
+# 13. VISUAL EFFECTS AND ANIMATION
+
+Create a polished presentation with:
+
+- Procedural body movement
+- Head animation
+- Body undulation
+- Tail movement
+- Emissive materials
+- Bloom where appropriate
+- Particle systems
+- Food collection bursts
+- Speed trails
+- Ability effects
+- Shield effects
+- Impact effects
+- Environmental particles
+- Floating score text
+- Smooth menu transitions
+- Animated button feedback
+- Camera easing
+- Arena lighting changes where appropriate
+
+Use original, locally available assets where possible.
+
+If external assets are needed, prefer appropriately licensed or public-domain resources. Record asset sources and licenses.
+
+Do not assume internet access, paid accounts, proprietary tools, or API credentials will be available.
+
+If an asset cannot be obtained, create a usable procedural substitute.
+
+Prioritize a cohesive visual style and performance over excessive effects.
+
+---
+
+# 14. AUDIO DESIGN
+
+Implement a complete audio system.
+
+Include:
+
+- Main-menu music
+- Gameplay music
+- Boss music
+- Victory music
+- Game-over music
+- Food pickup sounds
+- Rare pickup sounds
+- Boost sound
+- Ability activation sounds
+- Collision sounds
+- Elimination sounds
+- Button interaction sounds
+- UI notifications
+- Ambient arena audio
+
+Support separate volume controls for:
+
+- Master
+- Music
+- Sound effects
+- Ambient audio
+
+Add mute options and save preferences.
+
+Avoid clipping, excessively loud transitions, and repetitive sounds that become annoying during long sessions.
+
+Use original or properly licensed audio. Provide procedural or generated placeholder effects if suitable assets are unavailable.
+
+---
+
+# 15. OFFLINE GAMEPLAY
+
+Offline mode must work without an internet connection.
+
+Implement:
+
+- Local game startup
+- AI-controlled opponents
+- Food generation
+- Score calculation
+- Collision detection
+- Match lifecycle
+- Local statistics
+- Settings persistence
+- Cosmetic selection
+- Local achievements
+- Local best scores
+- Restart and menu navigation
+
+Do not require account creation, remote authentication, matchmaking, or cloud services to play offline.
+
+Use local save data with sensible validation, versioning, and safe defaults.
+
+If a save is missing, corrupt, or outdated, recover gracefully instead of crashing.
+
+Do not falsely label locally simulated matches as online matches.
+
+---
+
+# 16. ONLINE MULTIPLAYER
+
+Implement a real multiplayer architecture, not merely an online-looking menu.
+
+Support an initial target of multiple players in a shared arena, with a configurable player cap based on performance and network testing.
+
+The architecture should include:
+
+- Connection and disconnection handling
+- Lobby management
+- Match creation
+- Joining and leaving sessions
+- Player identity
+- Match start and end
+- Position and movement synchronization
+- Snake length and appearance synchronization
+- Food and collectible synchronization
+- Elimination events
+- Score synchronization
+- Latency handling
+- Reconnection handling where feasible
+- Network error messages
+- Server-authoritative validation for competitive gameplay
+
+Use interpolation and prediction where appropriate to keep movement smooth.
+
+Prevent clients from unilaterally deciding authoritative competitive outcomes.
+
+Do not trust client-submitted scores, currency, inventory, kills, or match results.
+
+Provide a clean abstraction between gameplay and the networking implementation.
+
+Choose a practical transport and server architecture only after verifying the environment, deployment constraints, expected scale, and available services.
+
+For local testing, create a documented way to launch a local server and connect multiple clients.
+
+For internet multiplayer, clearly document the server deployment requirements and any external configuration.
+
+Never invent server addresses, credentials, online services, player counts, or matchmaking results.
+
+If the environment lacks the infrastructure required to deploy online services, finish the offline game and a testable local multiplayer architecture first, then clearly document the remaining deployment requirements.
+
+Offline gameplay must remain functional if the network is unavailable.
+
+---
+
+# 17. DESKTOP APPLICATION
+
+Deliver a genuine desktop application, not merely a website open in a browser.
+
+Prioritize Windows desktop support. Add Linux and macOS builds when the environment and available export tools support them.
+
+Implement:
+
+- A standalone launchable application
+- Appropriate application icon
+- Application name and version
+- Windowed mode
+- Fullscreen mode
+- Borderless fullscreen where supported
+- Minimize
+- Maximize
+- Restore
+- Resizable window
+- Correct aspect ratio handling
+- Responsive UI
+- Pause on appropriate focus changes
+- Configurable resolution
+- Graphics settings
+- Keyboard and mouse controls
+- Clean application shutdown
+
+Use the operating system's normal window-management capabilities.
+
+Ensure the 3D viewport, HUD, menus, and game world fit correctly at common desktop resolutions and ultrawide aspect ratios.
+
+Test resizing the window while on the main menu and during gameplay.
+
+Do not force fullscreen permanently. Users must be able to minimize, maximize, restore, and resize the window normally.
+
+Create a release build and a practical installer or distribution package where supported.
+
+---
+
+# 18. ANDROID APPLICATION AND APK
+
+Create an Android build of the same game project.
+
+The game must be designed for touch interaction rather than simply shrinking the desktop interface.
+
+Implement:
+
+- Touch steering
+- Virtual joystick or a well-tested touch-follow control
+- Dedicated boost control
+- Ability buttons
+- Pause button
+- Touch-friendly menus
+- Safe-area handling
+- Screen rotation policy
+- Android back-button handling
+- Responsive layouts
+- Mobile graphics settings
+- Background and foreground handling
+- Sensible battery and thermal behavior
+
+Use appropriate touch target sizes and spacing.
+
+Avoid placing critical controls underneath system navigation areas or device cutouts.
+
+Use a configurable minimum Android version based on the engine, required features, and target devices.
+
+Provide a unique application identifier, launcher icon, splash screen, version number, and export configuration.
+
+Optimize the game for mobile GPUs and memory limits.
+
+Create quality presets such as:
+
+- Battery Saver
+- Balanced
+- High Quality
+
+Adjust rendering resolution, shadow quality, particle counts, post-processing, and visible environmental detail according to the selected preset.
+
+Test the APK on an emulator or connected Android device if available.
+
+Attempt to generate an installable APK and verify that the artifact exists and can be installed or launched.
+
+If release signing is required, prepare the configuration and explain which credentials the owner must supply. Never invent signing credentials or expose secrets.
+
+Do not claim that an APK has been generated unless the file actually exists.
+
+---
+
+# 19. RESPONSIVE UI AND ACCESSIBILITY
+
+Support a wide range of desktop and mobile screen sizes.
+
+The interface must:
+
+- Use responsive layout containers
+- Preserve correct proportions
+- Avoid text clipping
+- Avoid overlapping panels
+- Keep important buttons visible
+- Respect mobile safe areas
+- Handle different aspect ratios
+- Use consistent spacing
+- Use readable font sizes
+- Maintain clear visual hierarchy
+
+Add accessibility options where practical:
+
+- UI scale
+- Color-vision-friendly indicators
+- Reduced screen shake
+- Reduced visual effects
+- Audio controls
+- Remappable desktop controls
+- Sensitivity settings
+- Clear visual distinction between threats and collectibles
+
+Do not communicate essential gameplay information through color alone.
+
+---
+
+# 20. GRAPHICS SETTINGS AND PERFORMANCE
+
+Provide graphics options for:
+
+- Rendering quality
+- Resolution scale where supported
+- Shadow quality
+- Anti-aliasing where supported
+- Post-processing
+- Particle density
+- Environment detail
+- Frame-rate limit
+- V-sync where supported
+
+Profile actual performance instead of guessing.
+
+Use object pooling for frequently spawned objects where beneficial.
+
+Optimize:
+
+- Snake segment updates
+- Food spawning
+- Collision checks
+- AI decisions
+- Particle systems
+- Rendering
+- Network updates
+- Resource loading
+
+Use level-of-detail techniques, visibility culling, and simplified distant effects where appropriate.
+
+Set a sensible default performance target of smooth 60 FPS on capable hardware, with lower-cost settings for weaker devices.
+
+Do not promise a universal frame rate across all hardware.
+
+Avoid unbounded entity creation, unnecessary physics simulation, and expensive work in every frame.
+
+---
+
+# 21. SETTINGS AND DATA PERSISTENCE
+
+Save the user's preferences and appropriate progress.
+
+Persist:
+
+- Audio settings
+- Graphics settings
+- Control settings
+- Selected cosmetics
+- Selected arena preferences
+- Local statistics
+- Best scores
+- Progression
+- Achievements
+- Tutorial completion
+
+Use a versioned save format and safe loading.
+
+Validate loaded data and provide defaults for missing fields.
+
+Avoid storing sensitive account information in plaintext.
+
+For online features, use an appropriate authentication and persistence model rather than trusting local save files for competitive data.
+
+Ensure all settings affect actual behavior and persist across application restarts.
+
+---
+
+# 22. CODE QUALITY AND ERROR HANDLING
+
+Maintain a clean repository structure.
+
+Suggested structure:
+
+res://
+  assets/
+    audio/
+    materials/
+    models/
+    textures/
+    fonts/
+    icons/
+  scenes/
+    boot/
+    menus/
+    gameplay/
+    snakes/
+    enemies/
+    arenas/
+    ui/
+    effects/
+  scripts/
+    core/
+    gameplay/
+    ai/
+    networking/
+    ui/
+    audio/
+    persistence/
+    platform/
+  resources/
+    arenas/
+    cosmetics/
+    abilities/
+    missions/
+  tests/
+  docs/
+
+Adapt this structure to the actual project without unnecessary duplication.
+
+Include:
+
+- Project configuration
+- Input mappings
+- Export presets
+- Centralized gameplay configuration
+- README
+- Build instructions
+- Testing instructions
+- Architecture documentation
+- Multiplayer setup documentation
+- Known limitations
+
+Handle errors gracefully.
+
+Do not leave missing scene references, broken resources, invalid node paths, missing scripts, or nonfunctional buttons.
+
+Avoid placeholder implementations disguised as finished systems.
+
+Use comments where they clarify complex algorithms, not as a substitute for working code.
+
+---
+
+# 23. AUTOMATED TESTING AND QA
+
+Create a systematic testing process.
+
+## Gameplay tests
+
+Verify:
+
+- Snake movement works
+- Body segments follow correctly
+- Turning works at different speeds
+- Food collection increases score
+- Growth changes visible length
+- Collision rules work
+- Elimination works
+- Dropped food can be collected
+- Restart fully resets the match
+- Enemy AI behaves sensibly
+- Match timers work
+- Victory conditions work
+- Pause and resume work
+
+## UI tests
+
+Verify every button and navigation path.
+
+Test:
+
+- Main menu to gameplay
+- Main menu to settings
+- Back navigation
+- Pause and resume
+- Restart
+- Game over to main menu
+- Customization
+- Arena selection
+- Save and reload
+- Keyboard focus
+- Touch interaction
+
+Test narrow and wide aspect ratios and different UI scales.
+
+## Stability tests
+
+Repeatedly restart matches.
+
+Watch for:
+
+- Memory leaks
+- Duplicate nodes
+- Duplicate signal connections
+- Stale references
+- Performance degradation
+- Unhandled errors
+- Broken save data
+
+## Multiplayer tests
+
+Where implemented, test:
+
+- Multiple clients
+- Connection failures
+- Disconnects
+- Invalid messages
+- Synchronization
+- Match completion
+- Reconnection behavior
+- Server authority
+- Basic abuse and validation cases
+
+## Platform tests
+
+Run the project using the actual installed engine.
+
+Use headless or automated tests where suitable.
+
+Inspect runtime logs and fix errors.
+
+Run export commands for the targets that the local environment supports.
+
+Report tests that could not be performed rather than marking them as passed.
+
+---
+
+# 24. REQUIRED DELIVERABLES
+
+The completed repository must include:
+
+1. A fully playable 3D snake game.
+2. A polished main menu and navigation system.
+3. A working gameplay HUD.
+4. Multiple AI-controlled enemy snakes.
+5. Functional food collection and growth.
+6. Collision and elimination mechanics.
+7. Multiple playable offline modes.
+8. A working pause, death, victory, and restart loop.
+9. Snake customization.
+10. Multiple arena themes, with playable implementations.
+11. Sound effects and music integration.
+12. Persistent settings and local progress.
+13. Desktop controls and proper window behavior.
+14. Mobile touch controls and responsive UI.
+15. A documented multiplayer implementation and local test workflow.
+16. Desktop export configuration.
+17. Android export configuration.
+18. A release build for each target that can actually be built.
+19. An APK if the required Android toolchain is available.
+20. An installer or distribution package where supported.
+21. Automated or reproducible tests.
+22. README and build documentation.
+23. An asset license inventory.
+24. A final verification report.
+
+Use clear artifact names and place generated builds in a dedicated release directory, for example:
+
+builds/
+  desktop/
+  android/
+  installers/
+
+Do not commit credentials, signing keys, private tokens, or generated secret files.
+
+---
+
+# 25. DEVELOPMENT ORDER
+
+Work in the following sequence. Maintain a working build throughout development.
+
+## Phase 1 — Environment inspection
+
+Inspect the repository, operating system, engine installation, build tools, available SDKs, graphics capabilities, and available disk space.
+
+Determine the actual target platforms.
+
+Create a concise technical plan and repository structure.
+
+Do not waste time installing tools that are already available.
+
+Ask before performing actions requiring elevated privileges, account access, purchases, or irreversible changes.
+
+## Phase 2 — Playable 3D foundation
+
+Build the arena, player snake, body-following system, camera, food spawning, growth, collisions, score, AI opponents, death, and restart.
+
+Run the game and verify that the core gameplay loop works.
+
+Do not begin by building dozens of decorative screens.
+
+## Phase 3 — Visual quality
+
+Improve the snake model, materials, lighting, arena, camera, particles, animation, food effects, and audio.
+
+Optimize the experience for both desktop and Android.
+
+## Phase 4 — UI and game flow
+
+Build the home screen, mode selection, HUD, pause menu, game-over screen, victory screen, customization, settings, and all required navigation.
+
+Test every interactive control.
+
+## Phase 5 — Progression and content
+
+Implement cosmetics, local progression, achievements, additional game modes, arena variants, and boss encounters.
+
+Prioritize fully working features over a large collection of unfinished options.
+
+## Phase 6 — Multiplayer
+
+Implement and test networking, lobbies, authoritative match state, synchronization, disconnection handling, and a local multi-client test workflow.
+
+Document any external infrastructure required for internet deployment.
+
+## Phase 7 — Platform integration
+
+Build and test the desktop application.
+
+Build and test the Android APK when the required SDK and export templates are available.
+
+Fix platform-specific input, rendering, UI, and performance issues.
+
+## Phase 8 — Final QA
+
+Run automated tests, launch the actual application, inspect errors, verify navigation, test repeated restarts, and validate export artifacts.
+
+Fix critical issues before declaring the project complete.
+
+Produce a final report containing verified results and remaining limitations.
+
+---
+
+# 26. NON-NEGOTIABLE QUALITY RULES
+
+1. The game must be genuinely 3D.
+2. The core game must work offline.
+3. The snake must visibly grow after collecting food.
+4. Enemy snakes must move and behave intelligently enough to provide a challenge.
+5. Collisions and elimination must follow consistent rules.
+6. Restart must work repeatedly without corrupting the match.
+7. Every visible button must have a defined, working action.
+8. Every page must have appropriate navigation.
+9. UI elements must not overlap or become clipped at supported resolutions.
+10. The desktop application must support normal window management.
+11. Mobile controls must be designed for touch.
+12. The game must remain usable without optional paid assets or services.
+13. Multiplayer must never be falsely represented as operational when it is not.
+14. Save data must be validated.
+15. Performance must be measured and optimized.
+16. Build errors must be investigated and fixed where possible.
+17. No feature may be declared complete solely because its interface exists.
+18. Do not silently replace a native application with a browser-only page.
+19. Do not overwrite unrelated files or destroy existing project work.
+20. Do not claim to have accessed an account, downloaded an asset, run a test, or produced a build unless that action actually occurred.
+
+---
+
+# 27. EXECUTION INSTRUCTIONS
+
+Start now.
+
+First, inspect the actual development environment and existing files. Then implement the game in the phases described above.
+
+Do not stop after producing a plan, mockup, README, menu screen, or minimal prototype.
+
+Create the project files, write the code, run the game, test the mechanics, inspect failures, and iterate.
+
+Make sensible technical decisions independently when the requirements are clear. Ask only when a decision genuinely requires my preference, permission, credentials, or external account access.
+
+If the project is too large to finish in one pass, preserve a runnable build, prioritize the highest-value working features, and continue through the remaining tasks systematically.
+
+Use original assets or functional procedural alternatives.
+
+Never sacrifice the core playable experience merely to create an impressive screenshot.
+
+At every milestone, state:
+
+- What was implemented
+- Which files were created or modified
+- What was actually tested
+- What passed or failed
+- What remains
+- Which build artifacts exist
+
+At the end, provide exact launch commands, build commands, output locations, and setup instructions.
+
+**FINAL OBJECTIVE:** Deliver SERPENTIS 3D as a polished, playable, original 3D snake-arena game with a professional UI, satisfying movement, intelligent enemies, reliable offline gameplay, a documented multiplayer implementation, a native desktop application, and an Android APK wherever the available build environment permits.
+
+Begin by inspecting the environment, then build the actual game.
