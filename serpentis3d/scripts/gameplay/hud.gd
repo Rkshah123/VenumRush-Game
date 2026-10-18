@@ -38,6 +38,9 @@ var _arena_label: Label
 var _pause_btn: Button = null
 var _quit_panel: PanelContainer = null
 var _pause_settings := false
+var _joystick: TouchJoystick = null
+var _boost_panel: PanelContainer = null
+var _menu_column: VBoxContainer = null
 var _safe_tick := -1
 var _opt_selected: Button = null
 var _page := "main"
@@ -75,6 +78,7 @@ func _ready() -> void:
 	_apply_safe_area()
 
 	_build_gameplay()
+	_build_joystick()
 	_build_menu()
 	_build_pause()
 	_build_gameover()
@@ -161,6 +165,7 @@ func _build_gameplay() -> void:
 	_tfills.append([boost_bar, "accent"])
 	bv.add_child(boost_bar)
 	gameplay_group.add_child(boost_panel)
+	_boost_panel = boost_panel
 
 	# ability bar (Magnet Pulse / Shield) — hidden unless an ability is active
 	var ab_panel := PanelContainer.new()
@@ -207,11 +212,82 @@ func set_gameplay_visible(v: bool) -> void:
 	if _pause_btn != null:
 		_pause_btn.visible = v
 		_pause_btn.text = "❚❚"
+	if _joystick != null:
+		_refresh_joystick(v)
 
 func set_paused(paused: bool) -> void:
 	# HUD play/pause button mirrors the pause state (spec §3)
 	if _pause_btn != null:
 		_pause_btn.text = "▶" if paused else "❚❚"
+
+# ---------------------------------------------------------------- joystick
+
+func _build_joystick() -> void:
+	# PUBG-style left joystick: mobile + 2D mode only (spec §2)
+	_joystick = TouchJoystick.new()
+	_joystick.name = "Joystick"
+	gameplay_group.add_child(_joystick)
+	_refresh_joystick(false)
+
+func joystick() -> TouchJoystick:
+	return _joystick
+
+func _is_touch_device() -> bool:
+	return OS.has_feature("android") or OS.has_feature("ios")
+
+func _refresh_joystick(in_gameplay: bool) -> void:
+	if _joystick == null:
+		return
+	var want := in_gameplay and _is_touch_device() and int(SaveMgr.get_value("gfx_mode", 1)) == 0
+	if _joystick.force_joystick_dev:
+		want = in_gameplay and int(SaveMgr.get_value("gfx_mode", 1)) == 0
+	_joystick.enabled = want
+	if not want:
+		_joystick.force_release()
+	_move_hud_for_joystick(want)
+	_refresh_joystick_layout()
+
+func _move_hud_for_joystick(on: bool) -> void:
+	# the stick owns the bottom-left corner: shift boost/ability panels to the
+	# bottom-right so nothing overlaps (spec sections 2 and 7)
+	var w := 268.0
+	if on:
+		for p in [_boost_panel, _ability_panel]:
+			if p == null or not is_instance_valid(p):
+				continue
+			p.anchor_left = 1.0
+			p.anchor_right = 1.0
+			p.offset_left = -w - 18.0
+			p.offset_right = -18.0
+			p.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	else:
+		for p in [_boost_panel, _ability_panel]:
+			if p == null or not is_instance_valid(p):
+				continue
+			p.anchor_left = 0.0
+			p.anchor_right = 0.0
+			p.offset_left = 18.0
+			p.offset_right = w
+			p.grow_horizontal = Control.GROW_DIRECTION_END
+
+func _refresh_joystick_layout() -> void:
+	if _joystick == null:
+		return
+	var screen := Vector2(DisplayServer.screen_get_size())
+	var vs := get_viewport().get_visible_rect().size
+	var sl := 0.0
+	var sb := 0.0
+	if screen.x > 1.0 and screen.y > 1.0:
+		var safe: Rect2i = DisplayServer.get_display_safe_area()
+		if safe.size.x > 1 and safe.size.y > 1:
+			sl = maxf(0.0, float(safe.position.x)) * (vs.x / screen.x)
+			sb = maxf(0.0, float(screen.y - (safe.position.y + safe.size.y))) * (vs.y / screen.y)
+	var s := clampf(vs.y / 900.0, 0.8, 1.5)
+	_joystick.configure(s, sl + root.offset_left, sb + root.offset_bottom)
+
+func set_joystick_mode(_is_2d: bool) -> void:
+	# graphics mode changed: the stick only exists in mobile 2D mode
+	_refresh_joystick(gameplay_group.visible)
 
 func set_score(v: int) -> void:
 	if score_label.text == str(v):
@@ -359,6 +435,7 @@ func _build_menu() -> void:
 	vroot.custom_minimum_size = Vector2(420 * _ui_s, 0)
 	vroot.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hero_wrap.add_child(vroot)
+	_menu_column = vroot
 
 	var logo := TextureRect.new()
 	logo.texture = load("res://icon.png")
@@ -577,6 +654,7 @@ func _menu_page(page: String) -> void:
 	if _preview_vp != null:
 		# render every frame only on the skins page; keep a last-frame image elsewhere
 		_preview_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if page == "skins" else SubViewport.UPDATE_ONCE
+	call_deferred("_fit_menu_column")
 	AudioMgr.play("click")
 
 # ---------------------------------------------------------------- skins (spec §11)
@@ -754,6 +832,8 @@ func _build_pause_button() -> void:
 func show_pause(v: bool) -> void:
 	_pause_panel.visible = v
 	overlay_group.visible = v or (_quit_panel != null and _quit_panel.visible)
+	# the stick is only for live play (spec section 2)
+	_refresh_joystick(not v and gameplay_group.visible)
 
 # ---------------------------------------------------------------- game over
 
@@ -872,13 +952,34 @@ func _apply_safe_area() -> void:
 	root.offset_top = minf(top, vs.y * 0.08)
 	root.offset_right = -minf(right, vs.x * 0.08)
 	root.offset_bottom = -minf(bottom, vs.y * 0.08)
+	_refresh_joystick_layout()
+	call_deferred("_fit_menu_column")
 
 func _ui_scale() -> float:
-	# Menu scale: comfortable on 720p desktops up to tall phone screens.
+	# Menu/HUD scale. Width matters as much as height: a portrait phone must
+	# never overflow horizontally and a landscape one must never overflow
+	# vertically (the column is auto-fit on top of this, spec sections 3/4).
 	var vs := Vector2(1280, 720)
 	if is_inside_tree():
 		vs = get_viewport().get_visible_rect().size
-	return clampf(vs.y / 900.0, 0.72, 1.45)
+	return clampf(minf(vs.y / 900.0, vs.x / 640.0), 0.72, 1.5)
+
+func _fit_menu_column() -> void:
+	# Guarantee the menu column always fits the safe viewport: if it is taller
+	# than the screen (short landscape phone), scale the whole column about
+	# its center so every button stays visible and tappable — no scrolling,
+	# no clipping (spec section 3).
+	var v: VBoxContainer = _menu_column
+	if v == null or not is_instance_valid(v):
+		return
+	var vs := get_viewport().get_visible_rect().size
+	var avail := vs.y - root.offset_top - root.offset_bottom - 8.0
+	var need := v.get_combined_minimum_size().y
+	v.pivot_offset = v.size * 0.5
+	var s := 1.0
+	if need > avail and need > 1.0:
+		s = clampf(avail / need, 0.5, 1.0)
+	v.scale = Vector2(s, s)
 
 func _mk_label(text: String, size: int, role_or_color: Variant, parent: Node = null) -> Label:
 	# role_or_color: String = theme role (auto re-tints on theme switch),
@@ -910,9 +1011,13 @@ func _nav_button(text: String) -> Button:
 func _menu_button(parent: Node, text: String, on_press: Callable, primary: bool = false) -> Button:
 	var b := Button.new()
 	b.text = text
-	b.custom_minimum_size = Vector2(320 * _ui_s, (62 if primary else 44) * _ui_s)
+	# mobile-first touch targets: 54 px rows / 74 px primary (spec section 4)
+	var mob := _is_touch_device()
+	var row_h := (72 if primary else 54) if mob else (62 if primary else 44)
+	var fs := (27 if primary else 21) if mob else (26 if primary else 20)
+	b.custom_minimum_size = Vector2((340 if mob else 320) * _ui_s, row_h * _ui_s)
 	_style_button(b, primary)
-	b.add_theme_font_size_override("font_size", int((26 if primary else 20) * _ui_s))
+	b.add_theme_font_size_override("font_size", int(fs * _ui_s))
 	b.add_theme_color_override("font_color", UiTheme.c("panel_bg") if primary else UiTheme.c("text"))
 	b.add_theme_color_override("font_hover_color", UiTheme.c("panel_bg") if primary else UiTheme.c("accent"))
 	b.add_theme_color_override("font_pressed_color", UiTheme.c("panel_bg") if primary else UiTheme.c("accent"))
@@ -943,8 +1048,8 @@ func _option_button(parent: Node, text: String, group: String, value: int, on_pr
 	# settings/title selector button; tapping ALWAYS selects THIS value (never
 	# a toggle) and the active one is marked with a pulsing check (spec §1)
 	var b := _menu_button(parent, text, on_press)
-	b.custom_minimum_size = Vector2(168 * _ui_s, 40 * _ui_s)
-	b.add_theme_font_size_override("font_size", int(15 * _ui_s))
+	b.custom_minimum_size = Vector2((180 if _is_touch_device() else 168) * _ui_s, (48 if _is_touch_device() else 40) * _ui_s)
+	b.add_theme_font_size_override("font_size", int((17 if _is_touch_device() else 15) * _ui_s))
 	b.set_meta("opt_group", group)
 	b.set_meta("opt_value", value)
 	b.set_meta("opt_text", text)

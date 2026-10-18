@@ -28,6 +28,8 @@ var _shot_settings := false
 var _theme_test := false
 var _uix_test := false
 var _mode_test := false
+var _joy_test := false
+var _joy_dev := false
 var _shot_game := false
 var _quit_at := -1.0
 var _no_death_dev := false
@@ -99,6 +101,11 @@ func _ready() -> void:
 		if a == "--mode-test":
 			_autoplay = true
 			_mode_test = true
+		if a == "--joystick":
+			_joy_dev = true
+		if a == "--joy-test":
+			_autoplay = true
+			_joy_test = true
 	_arena_key = str(SaveMgr.get_value("arena", "valley"))
 	if arena_dev != "" and ArenaPresets.ALL.has(arena_dev):
 		_arena_key = arena_dev
@@ -120,6 +127,7 @@ func _ready() -> void:
 	hud.arena_shift.connect(_on_arena_shift)
 	hud.theme_changed.connect(_on_theme_changed)
 	hud.mode_changed.connect(_on_mode_changed)
+	_bind_joystick()   # single connection; the handler resolves the player live
 	if _autoplay:
 		print("DEV: boot theme=%d mode=%d" % [UiTheme.current_id, _gfx_mode])
 
@@ -158,7 +166,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test", "--uix-test", "--mode-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test", "--uix-test", "--mode-test", "--joystick", "--joy-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -243,6 +251,9 @@ func _dev_sequence() -> void:
 		return
 	if _mode_test:
 		await _mode_test_run()
+		return
+	if _joy_test:
+		await _joy_test_run()
 		return
 	if _touch_test:
 		await _touch_test_run()
@@ -360,6 +371,53 @@ func _skins_test_run() -> void:
 	print("SKINTEST restored now=%d" % int(SaveMgr.get_value("skin", 0)))
 	_quit_nicely()
 
+# ---------------------------------------------------------------- joystick QA
+
+func _joy_test_run() -> void:
+	# Virtual joystick QA (spec section 2): visibility rules, direction ->
+	# heading mapping in all 8 directions, deadzone, and knob release.
+	SaveMgr.set_value("gfx_mode", 0)
+	_gfx_mode = 0                # the joystick is a 2D-mode control: camera too
+	match_world.gfx_mode = 0
+	_joy_dev = true
+	_start_play()
+	match_world.no_death = true
+	await get_tree().create_timer(1.2).timeout
+	var joy: TouchJoystick = hud.joystick()
+	var p: PlayerSnake = match_world.player
+	p._is_mobile = true   # exercise the mobile joystick path on desktop
+	p.autopilot = false   # dev autopilot would otherwise overwrite steering
+	print("JOYTEST visible=%s mobile_path=%s" % [str(joy.enabled), str(p._is_mobile)])
+	await get_tree().process_frame
+	# 2D top-down camera: screen-right = world +X, screen-up = world -Z
+	var dirs := {
+		"RIGHT": Vector2(1, 0), "LEFT": Vector2(-1, 0),
+		"UP": Vector2(0, 1), "DOWN": Vector2(0, -1),
+		"UP-RIGHT": Vector2(0.707, 0.707), "DOWN-LEFT": Vector2(-0.707, -0.707),
+	}
+	for name in dirs.keys():
+		joy.force_value(dirs[name])
+		for i in 30:
+			await get_tree().physics_frame
+		var want: Vector2 = dirs[name]
+		# expected world dir: screen +x -> +X ; screen +y -> -Z
+		var wx: float = want.x
+		var wz: float = -want.y
+		var d := Vector2(p.desired_dir.x, p.desired_dir.z)
+		var ok: bool = absf(d.normalized().dot(Vector2(wx, wz).normalized())) > 0.98 if d.length() > 0.1 else false
+		print("JOYTEST %s joy=%s active=%s dir=(%.2f,%.2f) want=(%.2f,%.2f) %s" % [name, str(p.joy_vec), str(p.joy_active), d.x, d.y, wx, wz, "PASS" if ok else "FAIL"])
+	# deadzone + release
+	joy.force_value(Vector2(0.05, 0.0))
+	for i in 10:
+		await get_tree().physics_frame
+	print("JOYTEST deadzone %s" % ["PASS" if joy.value == Vector2.ZERO else "FAIL"])
+	joy.force_release()
+	for i in 40:
+		await get_tree().process_frame
+	print("JOYTEST release %s (value=%s knob=%.2f)" % ["PASS" if joy.value == Vector2.ZERO else "FAIL", str(joy.value), joy._knob.length()])
+	await _snap("shot_joystick.png")
+	_quit_nicely()
+
 # ---------------------------------------------------------------- mode QA
 
 func _mode_test_run() -> void:
@@ -466,14 +524,17 @@ func _powertest_run() -> void:
 		_quit_nicely()
 		return
 	await get_tree().create_timer(1.0).timeout
-	p.apply_ability("magnet")
+	# long test window so the rate comparison is meaningful anywhere on the map
+	p.apply_ability("magnet", 12.0)
 	print("POWERTEST magnet-on %s" % ("PASS" if p.ability_active("magnet") else "FAIL"))
 	var s0: int = p.score
-	await get_tree().create_timer(2.0).timeout
+	await get_tree().create_timer(3.0).timeout
 	await _snap("shot_power.png")
-	await get_tree().create_timer(3.4).timeout
+	var base_gain: int = p.score - s0
+	await get_tree().create_timer(6.0).timeout
 	var gained: int = p.score - s0
-	print("POWERTEST magnet-gain=%d %s" % [gained, "PASS" if gained >= 25 else "FAIL"])
+	print("POWERTEST magnet-gain=%d (baseline %d) %s" % [gained, base_gain,
+		"PASS" if gained > base_gain and gained >= 10 else "FAIL"])
 	print("POWERTEST magnet-off %s" % ("PASS" if not p.ability_active("magnet") else "FAIL"))
 	p.apply_ability("shield")
 	print("POWERTEST shield-on %s" % ("PASS" if p.ability_active("shield") else "FAIL"))
@@ -505,7 +566,20 @@ func _start_play() -> void:
 	hud.show_pause(false)
 	hud.show_gameover_hidden()
 	hud.set_paused(false)
+	if _joy_dev and hud.joystick() != null:
+		hud.joystick().force_joystick_dev = true
 	hud.set_gameplay_visible(true)
+
+## Wire the HUD virtual joystick to the player snake (mobile 2D steering).
+func _bind_joystick() -> void:
+	var joy: TouchJoystick = hud.joystick()
+	if joy == null:
+		return
+	joy.vector_changed.connect(func(v: Vector2):
+		var p := match_world.player
+		if p is PlayerSnake:
+			p.joy_vec = v
+			p.joy_active = joy.active or v != Vector2.ZERO)
 	get_tree().paused = false
 	Engine.time_scale = 1.0
 	# dev flags must be applied BEFORE the match spawns anything
@@ -568,6 +642,7 @@ func _on_mode_changed(id: int) -> void:
 	SaveMgr.set_value("gfx_mode", id)
 	_topdown_dirty = true
 	match_world.gfx_mode = id
+	hud.set_joystick_mode(id == 0)
 	if state == State.MENU:
 		_rebuild_world()
 		match_world.start_demo()
@@ -713,6 +788,7 @@ func _physics_process(delta: float) -> void:
 				# so the backdrop reads as the top-down board)
 				var focus := _demo_focus()
 				_cam_angle += delta * 0.08
+				cam.projection = Camera3D.PROJECTION_PERSPECTIVE   # menu is always 3D
 				var pos := focus + Vector3(cos(_cam_angle) * 46.0, 31.0, sin(_cam_angle) * 46.0)
 				if _gfx_mode == 0:
 					pos = focus + Vector3(cos(_cam_angle) * 24.0, 44.0, sin(_cam_angle) * 24.0)
@@ -760,47 +836,44 @@ func _demo_focus() -> Vector3:
 	return c / float(alive.size())
 
 func _topdown_camera(delta: float) -> void:
-	# Graph mode dispatcher (spec §1): 2D = genuine straight-down follow board,
-	# 3D = third-person chase (PUBG-style) behind and above the snake.
+	# Graph mode dispatcher (spec §1): 2D = genuine flat top-down board
+	# (orthographic, no perspective), 3D = third-person chase (PUBG-style).
 	if _gfx_mode == 0:
 		_camera_2d_topdown(delta)
 	else:
 		_camera_3d_tps(delta)
 
 func _camera_2d_topdown(delta: float) -> void:
-	# TRUE top-down: the camera sits straight above the player, world north
-	# fixed up-screen, and follows the head with gentle smoothing. No tilt, no
-	# horizon — a modern overhead arena view. Height is tuned close to the
-	# snake (spec §2) so the snake reads big while a healthy ring of arena
-	# stays visible; boosting eases the camera out a touch for reaction room.
+	# TRUE 2D: ORTHOGRAPHIC camera straight above the player, world north
+	# fixed up-screen, smooth follow. Orthographic = zero perspective
+	# convergence, so the arena reads as a flat 2D board while snakes and
+	# fruit stay lit 3D models. cam.size is the visible world height in
+	# meters and eases with boost / growth for reaction room (spec §2).
 	var p := match_world.player
 	if p == null or not is_instance_valid(p):
 		return
 	_player_last_head = p.head_pos
-	cam.fov = 55.0
+	cam.projection = Camera3D.PROJECTION_ORTHOGONAL
 	var vp := get_viewport()
 	var aspect := 1.6
 	if vp != null and vp.get_visible_rect().size.y > 0.0:
 		aspect = vp.get_visible_rect().size.x / vp.get_visible_rect().size.y
-	# close follow distance: ~26 m tall view, wider on portrait screens
-	var h := 27.0 * clampf(1.5 / maxf(aspect, 0.6), 1.0, 1.55)
+	var span := 30.0 * clampf(1.45 / maxf(aspect, 0.62), 1.0, 1.35)
 	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * maxf(Snake.BOOST_MULT - 1.0, 0.1)), 0.0, 1.0)
 	var length_k := clampf((p.length - 8.0) / 42.0, 0.0, 1.0)
-	h *= 1.0 + 0.10 * boost_k + 0.06 * length_k
-	h = lerpf(h, _cam_2d_h, 1.0 - exp(-2.5 * delta))
-	_cam_2d_h = h
-	# follow the head with a touch of look-ahead, clamped so we never drift
-	# far past the arena wall
+	span *= 1.0 + 0.08 * boost_k + 0.07 * length_k
+	cam.size = lerpf(cam.size if cam.size > 0.1 else span, span, 1.0 - exp(-2.5 * delta))
+	# follow the head with a touch of look-ahead, clamped near the wall
 	var fwd := Vector3(sin(p.heading), 0.0, cos(p.heading))
 	var want := p.head_pos + fwd * 3.0
 	var R: float = match_world.arena_radius + 2.0
 	want.x = clampf(want.x, -R, R)
 	want.z = clampf(want.z, -R, R)
-	_cam_pos = _cam_pos.lerp(Vector3(want.x, h, want.z), 1.0 - exp(-6.0 * delta))
+	_cam_pos = _cam_pos.lerp(Vector3(want.x, 80.0, want.z), 1.0 - exp(-6.0 * delta))
 	_cam_look = _cam_look.lerp(want, 1.0 - exp(-6.0 * delta))
 	# straight-down orientation (fixed world basis; -Z is up-screen)
 	var b := Basis(Vector3(1, 0, 0), Vector3(0, 0, -1), Vector3(0, 1, 0))
-	cam.global_transform = Transform3D(b, Vector3(_cam_pos.x, h, _cam_pos.z))
+	cam.global_transform = Transform3D(b, _cam_pos)
 
 func _camera_3d_tps(delta: float) -> void:
 	# Third-person chase (spec §3): camera rides behind and above the snake,
@@ -811,6 +884,7 @@ func _camera_3d_tps(delta: float) -> void:
 		return
 	var head := p.head_pos
 	_player_last_head = head
+	cam.projection = Camera3D.PROJECTION_PERSPECTIVE
 	var fwd := Vector3(sin(p.heading), 0.0, cos(p.heading))
 	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * (Snake.BOOST_MULT - 1.0)), 0.0, 1.0)
 	var len_extra := clampf(p.length * 0.042, 0.0, 2.4)

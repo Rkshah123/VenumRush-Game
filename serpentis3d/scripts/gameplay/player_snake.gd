@@ -14,6 +14,8 @@ var _touch_pos := Vector2.ZERO
 var _touch_has := false
 var _touch_ids := {}          # touch index -> alive (second finger = boost)
 var _idle_t := 0.0            # time since the last steering input
+var joy_active := false       # virtual joystick currently held
+var joy_vec := Vector2.ZERO   # joystick direction (screen space, y up)
 
 func _ready() -> void:
 	is_player = true
@@ -55,14 +57,18 @@ func _steer(delta: float) -> void:
 	# --- steering ---
 	var desired := Vector3.ZERO
 	if _is_mobile:
-		# touch steering: finger position is the pointer; no finger or dead
-		# zone = hold straight ahead (keeps the snake from fishing the last
-		# command forever)
+		# PUBG-style virtual joystick (mobile 2D): while a finger holds the
+		# stick it steers; otherwise the classic drag-steer path runs. A
+		# SECOND finger anywhere still boosts (spec section 2).
 		var off := _steer_offset_from(_touch_pos, cam) if _touch_has and cam else Vector2.ZERO
-		if off != Vector2.ZERO:
-			_idle_t = 0.0
+		if joy_active and cam:
+			if joy_vec == Vector2.ZERO:
+				desired_dir = Vector3(sin(heading), 0.0, cos(heading))
+			else:
+				desired_dir = _screen_offset_to_dir(Vector2(joy_vec.x, -joy_vec.y), cam)
+		elif cam and off != Vector2.ZERO:
 			desired_dir = _screen_offset_to_dir(off, cam)
-		else:
+		elif cam:
 			# Idle drift: while the fingers have not found the screen yet, carve
 			# a wide arena-safe arc (curving toward the center near the wall)
 			# instead of driving a straight line into the snake ahead.

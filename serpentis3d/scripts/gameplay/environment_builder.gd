@@ -78,21 +78,34 @@ func _ready() -> void:
 	_skip = int(OS.get_environment("ENV_SKIP"))
 	_build_sky_and_lights()
 	_build_court()
+	# 2D mode is a FLAT overhead board (spec): the surrounding 3D scenery is
+	# hidden so the arena reads as a genuine 2D plane, while gameplay objects
+	# (snakes, fruits, court boulders, boundary) stay 3D and lit. Collisions
+	# are unchanged — the obstacle set is identical in both modes.
 	if _skip < 2:
-		_build_terrace()
-		_build_far_range()
-		_build_rim_stones()
+		_decor(_build_terrace)
+		_decor(_build_far_range)
+		_decor(_build_rim_stones)
 	if _has_water and _skip < 3:
-		_build_river()
-		_build_lake()
-		_build_waterfall()
+		_decor(_build_river)
+		_decor(_build_lake)
+		_decor(_build_waterfall)
 	if _skip < 4:
-		_build_trees()
-		_build_grass()
-		_build_rocks()
-		_build_bushes_and_flowers()
+		_decor(_build_trees)
+		_decor(_build_grass)
+		_build_rocks()          # court boulders are gameplay obstacles — keep
+		_decor(_build_bushes_and_flowers)
 	_build_atmosphere()
 	_contrast_pass()
+
+## Build a decorative piece; hide it entirely in 2D (flat board) mode.
+func _decor(fn: Callable) -> void:
+	var before := get_child_count()
+	fn.call()
+	if _mode_2d:
+		for i in range(before, get_child_count()):
+			var c := get_child(i)
+			c.visible = false
 
 ## Theme visibility audit pass: every decor object (trees, stumps, rocks,
 ## bushes, flowers, rim stones) keeps a lit rim and enough albedo contrast to
@@ -396,6 +409,26 @@ func _build_court() -> void:
 	m.mesh = _radial_mesh(0.0, _arena_r, 160, 30, true)
 	m.material_override = _terrain_material()
 	add_child(m)
+	if _mode_2d:
+		# flat 2D board surround: the playable disc sits on a plain darker
+		# apron so the orthographic top-down view never shows sky/void and the
+		# kill radius reads as a clean designed boundary (spec section 1)
+		var s := MeshInstance3D.new()
+		s.mesh = _radial_mesh(_arena_r - 0.15, 150.0, 96, 3, true)
+		s.material_override = _surround_material()
+		s.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(s)
+
+func _surround_material() -> StandardMaterial3D:
+	var base := _dk(Color(_p["grass_a"]), 0.34).lerp(Color(0.055, 0.065, 0.085), 0.55)
+	var m := StandardMaterial3D.new()
+	m.albedo_color = base
+	m.roughness = 0.92
+	if _dark:
+		m.emission_enabled = true
+		m.emission = base
+		m.emission_energy_multiplier = 0.10
+	return m
 
 func _build_terrace() -> void:
 	var m := MeshInstance3D.new()
