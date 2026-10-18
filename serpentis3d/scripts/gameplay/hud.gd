@@ -343,7 +343,7 @@ func _build_pause() -> void:
 	_menu_button(p, "RESUME", func(): resume_pressed.emit())
 	_menu_button(p, "RESTART MATCH", func(): restart_pressed.emit())
 	_menu_button(p, "MAIN MENU", func(): tomenu_pressed.emit())
-	var hint := _mk_label("ESC TO RESUME", 13, COL_DIM, p)
+	var hint := _mk_label("ESC TO RESUME" if not OS.has_feature("android") else "BACK / TAP RESUME", 13, COL_DIM, p)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
 func show_pause(v: bool) -> void:

@@ -382,6 +382,20 @@ func _input(event: InputEvent) -> void:
 					_resume()
 				_:
 					pass
+	elif event.is_action_pressed("ui_cancel") or (event is InputEventKey and event.pressed and (event as InputEventKey).keycode == KEY_BACK):
+		# Android BACK: pause in a match, in pause menu or game over = menu,
+		# in settings = main menu, on main menu = allow quit via system default
+		match state:
+			State.PLAYING:
+				get_viewport().set_input_as_handled()
+				_pause()
+			State.PAUSED:
+				get_viewport().set_input_as_handled()
+				_resume()
+			State.OVER:
+				_to_menu()
+			_:
+				pass
 
 # ---------------------------------------------------------------- camera
 
@@ -465,6 +479,20 @@ func _quit_nicely() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		_quit_nicely()
+	elif what == NOTIFICATION_WM_GO_BACK_REQUEST:
+		# Android BACK (quit_on_go_back=false): pause in a match, otherwise
+		# hand the usual resume / menu paths (never hard-quit mid-run)
+		match state:
+			State.PLAYING:
+				_pause()
+			State.PAUSED:
+				_resume()
+			State.OVER:
+				_to_menu()
+			State.MENU:
+				_quit_nicely()
+			_:
+				pass
 
 # HUD signal alias fixups (declared after use for readability)
 func _hud_wiring_check() -> void:
