@@ -12,6 +12,7 @@ const DEFAULTS := {
 	"master_volume": 0.85,
 	"fullscreen": false,
 	"tutorial_seen": false,
+	"skin": 0,
 }
 
 var data: Dictionary = {}

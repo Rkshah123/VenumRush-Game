@@ -28,6 +28,8 @@ var _arena_test := false
 var _touch_test := false
 var _spawntest := false
 var _powertest := false
+var _skins_test := false
+var _skin_dev := -1
 var _diag_t := 0.0
 
 func _ready() -> void:
@@ -60,6 +62,8 @@ func _ready() -> void:
 			_onscreen_test = true
 		if a.begins_with("--arena="):
 			arena_dev = a.substr(8)
+		if a.begins_with("--skin="):
+			_skin_dev = int(a.substr(7))
 		if a == "--arena-test":
 			_autoplay = true
 			_arena_test = true
@@ -73,6 +77,9 @@ func _ready() -> void:
 		if a == "--powertest":
 			_autoplay = true
 			_powertest = true
+		if a == "--skins-test":
+			_autoplay = true
+			_skins_test = true
 	_arena_key = str(SaveMgr.get_value("arena", "valley"))
 	if arena_dev != "" and ArenaPresets.ALL.has(arena_dev):
 		_arena_key = arena_dev
@@ -119,7 +126,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--arena-test", "--touch-test", "--spawntest", "--powertest"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -131,6 +138,9 @@ func _collect_dev_args() -> Array[String]:
 			var k := src.substr(8)
 			if ArenaPresets.ALL.has(k):
 				_arena_key = k
+		elif src.begins_with("--skin="):
+			keep = true
+			_skin_dev = clampi(int(src.substr(7)), 0, SkinCatalog.count() - 1)
 		elif src == "--closeup" or src.begins_with("--closeup="):
 			keep = true
 		elif src.begins_with("--shot="):
@@ -154,6 +164,10 @@ func _dev_sequence() -> void:
 			await _snap("shot_arena%d.png" % (i + 1))
 			print("ARENA-TEST now=", _arena_key, " saved=", SaveMgr.get_value("arena"))
 		_quit_nicely()
+		return
+	if _skins_test:
+		# skins screen QA: menu-page switch, live preview, unlock gates, persistence
+		await _skins_test_run()
 		return
 	if _shot_menu:
 		await _snap("shot_menu.png")
@@ -239,6 +253,43 @@ func _touch_test_run() -> void:
 	await get_tree().create_timer(0.2).timeout
 	_quit_nicely()
 
+# ---------------------------------------------------------------- skins QA
+
+func _skins_test_run() -> void:
+	# stays in the MENU: page switch, live preview render, unlock gates, persistence
+	print("SKINTEST count %s" % ("PASS" if SkinCatalog.count() == 8 else "FAIL"))
+	print("SKINTEST unlock0 %s" % ("PASS" if SkinCatalog.unlocked(0, 0) else "FAIL"))
+	print("SKINTEST lock5 %s" % ("PASS" if not SkinCatalog.unlocked(5, 600) else "FAIL"))
+	print("SKINTEST clamp %s" % ("PASS" if SkinCatalog.get_skin(99).has("name") and SkinCatalog.get_skin(-2).has("name") else "FAIL"))
+	var before := int(SaveMgr.get_value("skin", 0))
+	var best := int(SaveMgr.get_value("best_score", 0))
+	hud._menu_page("skins")
+	await get_tree().create_timer(1.4).timeout
+	await _snap("shot_skins.png")
+	# equip the first unlocked skin different from the current one
+	var free := before
+	for i in SkinCatalog.count():
+		if SkinCatalog.unlocked(i, best):
+			free = i
+			break
+	hud._pick_skin(free)
+	print("SKINTEST pick=%d %s" % [free, "PASS" if int(SaveMgr.get_value("skin", 0)) == free else "FAIL"])
+	SaveMgr.save()
+	SaveMgr._load()
+	print("SKINTEST persist %s" % ("PASS" if int(SaveMgr.get_value("skin", 0)) == free else "FAIL"))
+	# lock gate: highest skin must stay unequipped at current best
+	var locked := SkinCatalog.count() - 1
+	hud._pick_skin(locked)
+	var gate_ok := int(SaveMgr.get_value("skin", 0)) != locked or SkinCatalog.unlocked(locked, best)
+	print("SKINTEST lock-gate %s" % ("PASS" if gate_ok else "FAIL"))
+	await get_tree().create_timer(0.6).timeout
+	await _snap("shot_skins2.png")
+	# restore the original choice
+	SaveMgr.set_value("skin", before)
+	SaveMgr.save()
+	print("SKINTEST restored now=%d" % int(SaveMgr.get_value("skin", 0)))
+	_quit_nicely()
+
 # ---------------------------------------------------------------- power QA
 
 func _powertest_run() -> void:
@@ -307,6 +358,11 @@ func _start_play() -> void:
 	if _spawntest and match_world.player != null:
 		# unsteered straight-line baseline (what an idle mobile player does)
 		match_world.player.autopilot = false
+	if match_world.player != null:
+		var skin_idx := _skin_dev if _skin_dev >= 0 else int(SaveMgr.get_value("skin", 0))
+		var sk := SkinCatalog.get_skin(skin_idx)
+		match_world.player.apply_skin(sk["dorsal"], sk["accent"], sk["belly"], sk["seed"])
+		print("SKIN apply=", sk["name"], " idx=", skin_idx)
 	AudioMgr.play("spawn")
 	hud.announce("SURVIVE", "COLLECT ORBS — GROW — ELIMINATE RIVALS")
 	if _closeup and match_world.player != null:

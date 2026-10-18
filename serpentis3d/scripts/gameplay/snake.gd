@@ -55,6 +55,7 @@ var ability := ""
 var ability_left := 0.0
 var _ability_dur := 1.0
 var _halo: MeshInstance3D
+var _skin_mats: Array = []   # [StandardMaterial3D, snout_flavor: bool] — head parts that recolor on apply_skin
 
 # Steering contract for subclasses:
 var desired_dir := Vector3(0, 0, 1)
@@ -569,11 +570,28 @@ func _build_head() -> void:
 
 func _skin_mat(snout_flavor: bool) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
-	var darker := dorsal.darkened(0.15)
-	m.albedo_color = darker if snout_flavor else dorsal.darkened(0.05)
+	m.albedo_color = _head_tint(snout_flavor)
 	m.roughness = 0.32
 	m.metallic = 0.06
+	_skin_mats.append([m, snout_flavor])
 	return m
+
+func _head_tint(snout_flavor: bool) -> Color:
+	return dorsal.darkened(0.15) if snout_flavor else dorsal.darkened(0.05)
+
+func apply_skin(d: Color, a: Color, b: Color, seed: float) -> void:
+	# Live reskin: body shader params + stored head materials recolor in place.
+	dorsal = d
+	accent = a
+	belly = b
+	skin_seed = seed
+	if _mat != null:
+		_mat.set_shader_parameter(&"u_dorsal", dorsal)
+		_mat.set_shader_parameter(&"u_accent", accent)
+		_mat.set_shader_parameter(&"u_belly", belly)
+		_mat.set_shader_parameter(&"u_seed", skin_seed)
+	for rec in _skin_mats:
+		(rec[0] as StandardMaterial3D).albedo_color = _head_tint(bool(rec[1]))
 
 func sync_head_params(body_r: float) -> void:
 	# Scale entire head rig with body radius so proportions stay believable

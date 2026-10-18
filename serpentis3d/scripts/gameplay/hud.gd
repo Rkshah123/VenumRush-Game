@@ -28,6 +28,12 @@ var _pop_layer: Control
 
 var _menu_main: VBoxContainer
 var _menu_settings: VBoxContainer
+var _menu_skins: VBoxContainer
+var _skin_buttons: Array[Button] = []
+var _preview_snake: Node3D = null
+var _preview_vp: SubViewport = null
+var _preview_cam: Camera3D = null
+var _preview_yaw := 0.0
 var _arena_label: Label
 var _pause_panel: PanelContainer
 var _over_panel: PanelContainer
@@ -309,6 +315,7 @@ func _build_menu() -> void:
 	next_b.pressed.connect(func(): arena_shift.emit(1))
 	arow.add_child(next_b)
 	_menu_button(_menu_main, "PLAY", func(): play_pressed.emit())
+	_menu_button(_menu_main, "SNAKES", func(): _menu_page("skins"))
 	_menu_button(_menu_main, "SETTINGS", func(): _swap_menu(false))
 	_menu_button(_menu_main, "QUIT", func(): quit_pressed.emit())
 	var hint := _mk_label("ORIGINAL OFFLINE BUILD v0.1 — GODOT 4.7", 12, COL_DIM, vroot)
@@ -342,11 +349,117 @@ func _build_menu() -> void:
 	)
 	_menu_settings.add_child(full)
 	_menu_button(_menu_settings, "BACK", func(): _swap_menu(true))
+	_build_skins_menu(vroot)
+	_menu_skins.visible = false
 
 func _swap_menu(show_main: bool) -> void:
-	_menu_main.visible = show_main
-	_menu_settings.visible = not show_main
+	_menu_page("main" if show_main else "settings")
+
+func _menu_page(page: String) -> void:
+	_menu_main.visible = page == "main"
+	_menu_settings.visible = page == "settings"
+	_menu_skins.visible = page == "skins"
+	if _preview_snake != null:
+		_preview_snake.set_physics_process(page == "skins")
+	if _preview_vp != null:
+		# render every frame only on the skins page; keep a last-frame image elsewhere
+		_preview_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if page == "skins" else SubViewport.UPDATE_ONCE
 	AudioMgr.play("click")
+
+# ---------------------------------------------------------------- skins (spec §11)
+
+func _build_skins_menu(vroot: Container) -> void:
+	_menu_skins = VBoxContainer.new()
+	_menu_skins.add_theme_constant_override("separation", 8)
+	vroot.add_child(_menu_skins)
+	_mk_label("CHOOSE YOUR SERPENT", 20, COL_ACCENT, _menu_skins)
+
+	# live 3D preview: a real Snake slithering in a small viewport
+	var pv := SubViewportContainer.new()
+	pv.stretch = true
+	pv.custom_minimum_size = Vector2(360, 190)
+	var frame := PanelContainer.new()
+	frame.add_theme_stylebox_override("panel", _panel_style(0.55))
+	frame.add_child(pv)
+	_menu_skins.add_child(frame)
+	var vp := SubViewport.new()
+	vp.own_world_3d = true
+	vp.transparent_bg = true
+	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	pv.add_child(vp)
+	_preview_vp = vp
+	var sun := DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-52, -30, 0)
+	sun.light_energy = 1.7
+	vp.add_child(sun)
+	var amb := WorldEnvironment.new()
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0.03, 0.05, 0.08, 1.0)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.5, 0.55, 0.62)
+	env.ambient_light_energy = 1.2
+	amb.environment = env
+	vp.add_child(amb)
+	_preview_cam = Camera3D.new()
+	_preview_cam.position = Vector3(0, 2.4, 4.6)
+	vp.add_child(_preview_cam)
+	_preview_snake = _PreviewSnake.new()
+	vp.add_child(_preview_snake)
+	_preview_snake.spawn(Vector3.ZERO, Vector3(0, 0, 1), 9.0)
+	_preview_snake.set_physics_process(false)   # starts when the skins page opens
+	var cur := int(SaveMgr.get_value("skin", 0))
+	var sk0 := SkinCatalog.get_skin(cur)
+	_preview_snake.apply_skin(sk0["dorsal"], sk0["accent"], sk0["belly"], sk0["seed"])
+
+	# grid of skin buttons
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 10)
+	grid.add_theme_constant_override("v_separation", 6)
+	_menu_skins.add_child(grid)
+	for i in SkinCatalog.count():
+		var b := _menu_button(grid, "", func(): _pick_skin(i))
+		b.custom_minimum_size = Vector2(225, 38)
+		b.add_theme_font_size_override("font_size", 15)
+		_skin_buttons.append(b)
+	_refresh_skin_buttons()
+
+func _refresh_skin_buttons() -> void:
+	var best := int(SaveMgr.get_value("best_score", 0))
+	var cur := int(SaveMgr.get_value("skin", 0))
+	for i in _skin_buttons.size():
+		var b := _skin_buttons[i]
+		var sk := SkinCatalog.get_skin(i)
+		if not SkinCatalog.unlocked(i, best):
+			b.text = "LOCKED %d" % int(sk["unlock"])
+			b.disabled = true
+		else:
+			b.disabled = false
+			b.text = ("► %s" % sk["name"]) if i == cur else sk["name"]
+
+func _pick_skin(i: int) -> void:
+	var best := int(SaveMgr.get_value("best_score", 0))
+	if not SkinCatalog.unlocked(i, best):
+		return
+	SaveMgr.set_value("skin", i)
+	SaveMgr.save()
+	_refresh_skin_buttons()
+	var sk := SkinCatalog.get_skin(i)
+	if _preview_snake != null:
+		_preview_snake.apply_skin(sk["dorsal"], sk["accent"], sk["belly"], sk["seed"])
+
+func _process(delta: float) -> void:
+	if _menu_skins != null and _menu_skins.visible and _preview_snake != null and _preview_vp != null:
+		var target: Vector3 = _preview_snake.head_pos + Vector3.UP * 0.6
+		_preview_yaw += delta * 0.7
+		_preview_cam.position = target + Vector3(sin(_preview_yaw) * 4.4, 2.2, cos(_preview_yaw) * 4.4)
+		_preview_cam.look_at(target)
+
+class _PreviewSnake extends Snake:
+	# menu preview: glides in a continuous circle so the skin reads from all sides
+	func _steer(_delta: float) -> void:
+		desired_dir = Vector3(sin(heading + 0.55), 0.0, cos(heading + 0.55)).normalized()
 
 func set_arena(key: String) -> void:
 	if _arena_label == null:
