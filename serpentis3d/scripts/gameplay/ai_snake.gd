@@ -65,9 +65,13 @@ func _steer(delta: float) -> void:
 		_rethink()
 
 	# --- weighted steering composition ---
+	# opening relax: every snake explores straight for the first ~2.4 s so the
+	# field spreads instead of funneling the whole roster onto one apple
+	var relax: bool = match_world != null and float(match_world.match_time) < 2.4
+
 	var want := Vector3.ZERO
 
-	match mode:
+	match (Mode.WANDER if relax else mode):
 		Mode.SEEK:
 			if _food_pos != Vector3.INF:
 				var to_food := (_food_pos - head_pos)

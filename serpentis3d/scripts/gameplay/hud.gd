@@ -111,7 +111,7 @@ func _build_gameplay() -> void:
 	boost_panel.offset_bottom = -16
 	var bv := VBoxContainer.new()
 	boost_panel.add_child(bv)
-	_mk_label("BOOST  [SPACE / LMB]", 13, COL_DIM, bv)
+	_mk_label("BOOST  [SPACE / LMB]" if not OS.has_feature("android") else "BOOST  [2ND FINGER]", 13, COL_DIM, bv)
 	boost_bar = ProgressBar.new()
 	boost_bar.min_value = 0
 	boost_bar.max_value = 1.0
@@ -274,7 +274,7 @@ func _build_menu() -> void:
 	_menu_button(_menu_main, "SETTINGS", func(): _swap_menu(false))
 	_menu_button(_menu_main, "QUIT", func(): quit_pressed.emit())
 	var hint := _mk_label("ORIGINAL OFFLINE BUILD v0.1 — GODOT 4.7", 12, COL_DIM, vroot)
-	hint.text = "   OFFLINE BUILD v0.1 — mouse steers, LMB boosts"
+	hint.text = "   OFFLINE BUILD v0.1 — mouse steers, LMB boosts" if not OS.has_feature("android") else "   OFFLINE BUILD v0.1 — drag steers, 2nd finger boosts"
 
 	_menu_settings = VBoxContainer.new()
 	_menu_settings.add_theme_constant_override("separation", 10)
@@ -376,6 +376,7 @@ func show_gameover_hidden() -> void:
 func show_gameover(stats: Dictionary) -> void:
 	_over_title.text = str(stats.get("title", "ELIMINATED"))
 	var lines := "\n".join(PackedStringArray([
+		"CAUSE      %s" % str(stats.get("cause", "unknown")),
 		"SCORE      %s%s" % [stats.get("score", 0), "   [NEW BEST]" if bool(stats.get("is_best", false)) else ""],
 		"LENGTH     %d M" % int(stats.get("length", 0.0)),
 		"SURVIVED   %d:%02d" % [int(stats.get("time", 0.0)) / 60, int(stats.get("time", 0.0)) % 60],

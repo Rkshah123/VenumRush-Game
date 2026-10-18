@@ -22,6 +22,7 @@ var hud = null
 var match_time := 0.0
 var _hb := 0.0
 var last_kill_text := ""
+var player_cause := ""
 var running := false
 var demo_mode := false
 var no_death := false
@@ -30,6 +31,8 @@ var skip_hud_dev := false
 var verbose := false
 var boss_scheduled := false
 var _worst_dt := 0.0
+var _spawn_base_ang := 0.0
+var _ring_idx := 0
 
 var _next_id := 1
 var _respawn_queue: Array = []
@@ -59,6 +62,8 @@ func start_match() -> void:
 	_clear()
 	demo_mode = false
 	running = true
+	_spawn_base_ang = randf() * TAU
+	_ring_idx = 0
 	# player
 	var p: PlayerSnake = PlayerSnake.new()
 	_attach(p, true, 7.0)
@@ -91,6 +96,10 @@ func _clear() -> void:
 	_hash.clear()
 	_milestones.clear()
 	_id_map.clear()
+	_spawn_base_ang = randf() * TAU
+	_ring_idx = 0
+	player_cause = ""
+	last_kill_text = ""
 
 func _spawn_ai() -> void:
 	var pers: String = PERSONALITY_POOL[_pers_cycle % PERSONALITY_POOL.size()]
@@ -116,8 +125,42 @@ func _attach(s: Snake, is_player: bool, start_len: float) -> void:
 	s.match_world = self
 	if demo_mode:
 		start_len = randf_range(8.0, 14.0)
-	var ang := randf() * TAU
-	var rad := arena_radius * randf_range(0.35, 0.72)
+	# Opening fill (real matches): seat everyone on a tangent ring — equal
+	# spacing, identical rotation direction — so no snake spawns facing or
+	# converging on another. Mid-match entries (respawns / boss) scatter.
+	var total_for_ring := 1 if solo_dev else (AI_TARGET + 1)
+	var ring_slot := -1
+	if not demo_mode and match_time < 0.5 and _ring_idx < total_for_ring:
+		ring_slot = _ring_idx
+		_ring_idx += 1
+	var ang: float
+	var rad: float
+	if ring_slot >= 0:
+		ang = _spawn_base_ang + TAU * ring_slot / float(total_for_ring)
+		# ring seats must not share a boulder: drift the seat outward/inward
+		# with alternating growing steps until the neighborhood is clear.
+		# Alternating base bands double the distance between successive seats
+		# and stop the ring from degenerating into a single-file tangent
+		# parade (followers nose into the snake ahead when speeds differ).
+		var rr: float = arena_radius * (0.66 if ring_slot % 2 == 0 else 0.44)
+		var good := false
+		for attempt in 14:
+			var probe := Vector3(sin(ang) * rr, 0.0, cos(ang) * rr)
+			var clean := true
+			for ob in obstacles:
+				if probe.distance_to(ob["pos"] as Vector3) < float(ob["r"]) + 3.8:
+					clean = false
+					break
+			if clean:
+				good = true
+				break
+			var step: float = arena_radius * (0.025 + 0.012 * float(attempt))
+			rr = clampf(rr + (step if attempt % 2 == 0 else -step), arena_radius * 0.16, arena_radius * 0.86)
+		if good:
+			rad = rr
+	else:
+		ang = randf() * TAU
+		rad = arena_radius * randf_range(0.35, 0.72)
 	var pos := Vector3(sin(ang) * rad, 0.0, cos(ang) * rad)
 	# spawn separation: never materialize inside an existing snake's neighborhood
 	for attempt in 12:
@@ -126,12 +169,14 @@ func _attach(s: Snake, is_player: bool, start_len: float) -> void:
 		pos = Vector3(sin(ang) * rad, 0.0, cos(ang) * rad)
 		var clear := true
 		for o in snakes:
-			if is_instance_valid(o) and o.alive and o.head_pos.distance_to(pos) < 12.0:
+			if is_instance_valid(o) and o.alive and o.head_pos.distance_to(pos) < 16.0:
 				clear = false
 				break
 		if clear:
 			break
-	var tape := ang + PI * 0.5 + randf_range(-0.4, 0.4)
+	# ring seats move TANGENTIALLY (all same direction); scattered entries
+	# keep the old tangent-jitter heading
+	var tape := ang + PI * 0.5 + randf_range(-0.4, 0.4) if ring_slot < 0 else ang + PI * 0.5
 	var dir := Vector3(sin(tape), 0.0, cos(tape))
 	add_child(s)
 	_id_map[s.id] = s
@@ -139,6 +184,9 @@ func _attach(s: Snake, is_player: bool, start_len: float) -> void:
 	snakes.append(s)
 	s.died.connect(_on_died)
 	AudioMgr.play("spawn", -6.0)
+	if verbose:
+		var who := "PLAYER" if is_player else s.display_name
+		print("SPAWN %s slot=%d pos=(%.1f,%.1f) rad=%.1f dir=(%.2f,%.2f)" % [who, ring_slot, pos.x, pos.z, pos.length(), dir.x, dir.z])
 
 func is_boss_alive() -> bool:
 	for s in snakes:
@@ -306,7 +354,11 @@ func _kill(victim: Snake, killer, cause_name: String) -> void:
 		match_event.emit("kill", "%s was cut down by %s" % [victim.display_name, killer.display_name])
 	else:
 		match_event.emit("kill", "%s crashed into %s" % [victim.display_name, cause_name])
-	last_kill_text = "%s <- %s (pos=%.1v rad=%.0f)" % [victim.display_name, cause, victim.head_pos, victim.head_pos.length()]
+	last_kill_text = "%s <- %s (pos=%.1v rad=%.0f t=%.1f age=%.1f)" % [victim.display_name, cause, victim.head_pos, victim.head_pos.length(), match_time, (Time.get_ticks_msec() - victim.spawn_ms) * 0.001]
+	if victim.is_player:
+		player_cause = cause_name
+	if verbose:
+		print("KILL:", last_kill_text)
 	victim.die(cause if killer == null or not is_instance_valid(killer) else killer.display_name)
 
 func _on_died(s: Snake, killer_name: String) -> void:

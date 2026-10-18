@@ -35,6 +35,7 @@ var alive := true
 var score := 0
 var kills := 0
 var spawn_ms := 0
+var spawn_match_time := 0.0
 
 var length := 7.0
 var target_length := 7.0
@@ -110,6 +111,7 @@ func spawn(pos: Vector3, dir: Vector3, body_len: float) -> void:
 	speed_cur = BASE_SPEED
 	boost_meter = BOOST_MAX
 	spawn_ms = Time.get_ticks_msec()
+	spawn_match_time = match_world.match_time if match_world != null else 0.0
 
 	# Fill polyline with a straight tail extending backwards so the body exists immediately.
 	var back := -Vector3(dir.x, 0.0, dir.z).normalized()
@@ -295,7 +297,11 @@ func die(killer_name: String = "") -> void:
 	died.emit(self, killer_name)
 
 func head_fatal_grace_active() -> bool:
-	return Time.get_ticks_msec() - spawn_ms < 1500
+	# gameplay-clock based: on slow devices match_time runs slower than wall
+	# time, so the spawn shield must expire in MATCH seconds, not wall seconds
+	if match_world != null:
+		return match_world.match_time - spawn_match_time < 2.5
+	return Time.get_ticks_msec() - spawn_ms < 2500
 
 func kill_count_add() -> void:
 	kills += 1

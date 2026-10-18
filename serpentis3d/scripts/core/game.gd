@@ -25,6 +25,8 @@ var _solo_dev := false
 var _skip_hud_dev := false
 var _onscreen_test := false
 var _arena_test := false
+var _touch_test := false
+var _spawntest := false
 var _diag_t := 0.0
 
 func _ready() -> void:
@@ -60,6 +62,13 @@ func _ready() -> void:
 		if a == "--arena-test":
 			_autoplay = true
 			_arena_test = true
+		if a == "--touch-test":
+			_autoplay = true
+			_touch_test = true
+			_solo_dev = true
+		if a == "--spawntest":
+			_autoplay = true
+			_spawntest = true
 	_arena_key = str(SaveMgr.get_value("arena", "valley"))
 	if arena_dev != "" and ArenaPresets.ALL.has(arena_dev):
 		_arena_key = arena_dev
@@ -106,7 +115,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--arena-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--arena-test", "--touch-test", "--spawntest"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -147,6 +156,14 @@ func _dev_sequence() -> void:
 	await get_tree().create_timer(0.6).timeout
 	_start_play()
 	print("DEV: play started")
+	if _touch_test:
+		await _touch_test_run()
+		return
+	if _spawntest:
+		await get_tree().create_timer(7.0).timeout
+		print("SPAWNTEST done — survives=", match_world.player != null and match_world.player.alive)
+		_quit_nicely()
+		return
 	if _quit_at > 0.0:
 		await get_tree().create_timer(_quit_at * 0.5).timeout
 		print("DEV: mid timer fired")
@@ -156,6 +173,64 @@ func _dev_sequence() -> void:
 		if _shot_game:
 			await _snap("shot_game.png")
 		_quit_nicely()
+
+# ---------------------------------------------------------------- touch QA
+
+func _touch_tap(index: int, pressed: bool, pos: Vector2) -> void:
+	var ev := InputEventScreenTouch.new()
+	ev.index = index
+	ev.pressed = pressed
+	ev.position = pos
+	Input.parse_input_event(ev)
+
+func _touch_drag(index: int, pos: Vector2) -> void:
+	var ev := InputEventScreenDrag.new()
+	ev.index = index
+	ev.position = pos
+	Input.parse_input_event(ev)
+
+func _touch_test_run() -> void:
+	# Synthetic touch QA on desktop: verify drag-steering, dead zone and the
+	# second-finger boost on the exact same code path Android uses.
+	var p: PlayerSnake = match_world.player
+	if p == null:
+		print("TOUCHTEST FAIL no player")
+		_quit_nicely()
+		return
+	var vs := get_viewport().get_visible_rect().size
+	var wrap := func(a: float, b: float) -> float: return absf(wrapf(a - b, -PI, PI))
+	await get_tree().create_timer(0.5).timeout
+	var h0: float = p.heading
+	# 1) finger down right of center → steering rotation
+	_touch_tap(0, true, Vector2(vs.x * 0.72, vs.y * 0.5))
+	await get_tree().create_timer(0.85).timeout
+	var t1: float = wrap.call(p.heading, h0)
+	print("TOUCHTEST steer dt=%.3f %s" % [t1, "PASS" if t1 > 0.10 else "FAIL"])
+	var td := p.desired_dir
+	print("TOUCHTEST intent len=%.2f %s" % [td.length(), "PASS" if td.length() > 0.05 else "FAIL"])
+	# 2) dead zone: second drag near center → desired_dir releases to center
+	var hz: float = p.heading
+	_touch_drag(0, Vector2(vs.x * 0.52, vs.y * 0.52))
+	await get_tree().create_timer(0.4).timeout
+	var drift: float = wrap.call(p.heading, hz)
+	print("TOUCHTEST deadzone drift=%.3f %s" % [drift, "PASS" if drift < 0.06 else "FAIL"])
+	# 3) second finger → boost
+	_touch_tap(1, true, Vector2(vs.x * 0.22, vs.y * 0.72))
+	await get_tree().create_timer(0.35).timeout
+	print("TOUCHTEST boost %s" % ("PASS" if p.input_boost else "FAIL"))
+	# 4) release second finger → boost off
+	_touch_tap(1, false, Vector2(vs.x * 0.22, vs.y * 0.72))
+	await get_tree().create_timer(0.35).timeout
+	print("TOUCHTEST boost-off %s" % ("PASS" if not p.input_boost else "FAIL"))
+	# 5) steer the other side → rotation continues (nonzero, opposite sign)
+	_touch_drag(0, Vector2(vs.x * 0.28, vs.y * 0.5))
+	await get_tree().create_timer(0.85).timeout
+	var t5: float = wrapf(p.heading - h0, -PI, PI)
+	print("TOUCHTEST steer-back dt=%.3f %s" % [absf(t5), "PASS" if absf(t5) > 0.10 else "FAIL"])
+	# cleanup + quit
+	_touch_tap(0, false, Vector2(vs.x * 0.28, vs.y * 0.5))
+	await get_tree().create_timer(0.2).timeout
+	_quit_nicely()
 
 func _snap(fname: String) -> void:
 	print("SNAP-START ", fname)
@@ -190,6 +265,14 @@ func _start_play() -> void:
 	match_world.start_match()
 	if _autoplay and match_world.player != null:
 		match_world.player.autopilot = true
+	if _touch_test and match_world.player != null:
+		# synthetic-touch QA: disable the dev brain, enable the touch path
+		match_world.player.autopilot = false
+		match_world.player.touch_sim = true
+		match_world.player._is_mobile = true
+	if _spawntest and match_world.player != null:
+		# unsteered straight-line baseline (what an idle mobile player does)
+		match_world.player.autopilot = false
 	AudioMgr.play("spawn")
 	hud.announce("SURVIVE", "COLLECT ORBS — GROW — ELIMINATE RIVALS")
 	if _closeup and match_world.player != null:
@@ -249,7 +332,9 @@ func _on_player_died() -> void:
 	await get_tree().create_timer(0.75, true, false, true).timeout
 	Engine.time_scale = 1.0
 	var is_best: bool = SaveMgr.record_run(stats["score"], stats["length"], stats["kills"])
+	SaveMgr.save()   # death is the only reliable save moment on mobile
 	stats["is_best"] = is_best
+	stats["cause"] = match_world.player_cause if match_world.player_cause != "" else "unknown"
 	stats["best"] = SaveMgr.get_value("best_score", 0)
 	if is_best:
 		stats["title"] = "NEW PERSONAL BEST"

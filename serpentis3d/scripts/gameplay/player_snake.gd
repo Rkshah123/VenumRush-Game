@@ -1,45 +1,76 @@
 class_name PlayerSnake
 extends Snake
 ## Player-controlled snake: steer toward pointer (or keys), boost via Space/Left Mouse.
+## Android touch: ONE finger drag steers toward the finger (relative to screen
+## center, same projection as the mouse); a SECOND finger anywhere = boost.
 
 var _key_yaw := 0.0
 var autopilot := false        # dev autoplay: seek food, avoid walls, live long
 
+# --- touch state (mobile) ---
+var touch_sim := false        # dev --touch-test: force the touch code path on desktop
+var _is_mobile := false
+var _touch_pos := Vector2.ZERO
+var _touch_has := false
+var _touch_ids := {}          # touch index -> alive (second finger = boost)
+
 func _ready() -> void:
 	is_player = true
+	_is_mobile = OS.has_feature("android") or OS.has_feature("ios") or touch_sim
 	super._ready()
+
+func _unhandled_input(event: InputEvent) -> void:
+	if not _is_mobile or autopilot:
+		return
+	if event is InputEventScreenTouch:
+		if (event as InputEventScreenTouch).pressed:
+			_touch_ids[(event as InputEventScreenTouch).index] = true
+			_touch_pos = (event as InputEventScreenTouch).position
+			_touch_has = true
+		else:
+			_touch_ids.erase((event as InputEventScreenTouch).index)
+			if _touch_ids.is_empty():
+				_touch_has = false
+	elif event is InputEventScreenDrag:
+		_touch_pos = (event as InputEventScreenDrag).position
+		_touch_has = true
+
+func _steer_offset_from(p: Vector2, cam: Camera3D) -> Vector2:
+	# Shared projection: screen offset from center, clamped, dead-zoned.
+	var vs := get_viewport().get_visible_rect().size
+	var off := (p - vs * 0.5) / vs.y
+	off.x = clampf(off.x, -0.5, 0.5)
+	off.y = clampf(off.y, -0.5, 0.5)
+	if off.length() < 0.065:
+		return Vector2.ZERO
+	return off
 
 func _steer(delta: float) -> void:
 	if autopilot:
 		_autopilot_steer()
 		return
-	var vp := get_viewport()
-	var cam := vp.get_camera_3d()
+	var cam := get_viewport().get_camera_3d()
 
-	# --- pointer steering (mouse or emulated touch) ---
+	# --- steering ---
+	var desired := Vector3.ZERO
+	if _is_mobile:
+		# touch steering: finger position is the pointer; no finger or dead
+		# zone = hold straight ahead (keeps the snake from fishing the last
+		# command forever)
+		var off := _steer_offset_from(_touch_pos, cam) if _touch_has and cam else Vector2.ZERO
+		if cam and off != Vector2.ZERO:
+			desired_dir = _screen_offset_to_dir(off, cam)
+		elif cam:
+			desired_dir = Vector3(sin(heading), 0.0, cos(heading))
+		input_boost = _touch_ids.size() >= 2
+		return
+
 	var off := Vector2.ZERO
 	if cam:
-		var mp := vp.get_mouse_position()
-		var vs := vp.get_visible_rect().size
-		var center := vs * 0.5
-		off = (mp - center) / vs.y
-		off.x = clampf(off.x, -0.5, 0.5)
-		off.y = clampf(off.y, -0.5, 0.5)
-		if off.length() < 0.065:
-			off = Vector2.ZERO
+		off = _steer_offset_from(get_viewport().get_mouse_position(), cam)
 
-	var desired := Vector3.ZERO
 	if cam and off != Vector2.ZERO:
-		var basis := cam.global_transform.basis
-		var right := basis.x
-		right.y = 0.0
-		right = right.normalized()
-		var fwd := -basis.z
-		fwd.y = 0.0
-		fwd = fwd.normalized()
-		desired = (right * off.x + fwd * (-off.y))
-		desired.y = 0.0
-		desired = desired.normalized()
+		desired = _screen_offset_to_dir(off, cam)
 	else:
 		# keyboard fallback (A/D) if no camera or pointer centered
 		var k := 0.0
@@ -54,6 +85,21 @@ func _steer(delta: float) -> void:
 		desired_dir = desired if desired.length_squared() > 0.9 else desired.normalized()
 
 	input_boost = Input.is_key_pressed(KEY_SPACE) or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+
+func _screen_offset_to_dir(off: Vector2, cam: Camera3D) -> Vector3:
+	# Screen-offset → world direction. off.y < 0 = pointer BELOW center =
+	# steer toward camera-forward (snake moves down-screen); drag up = steer
+	# away from the camera (toward the horizon).
+	var basis := cam.global_transform.basis
+	var right := basis.x
+	right.y = 0.0
+	right = right.normalized()
+	var fwd := -basis.z
+	fwd.y = 0.0
+	fwd = fwd.normalized()
+	var d := right * off.x + fwd * (-off.y)
+	d.y = 0.0
+	return d.normalized() if d.length_squared() > 0.9 else d
 
 func _autopilot_steer() -> void:
 	# Dev-brain for automated QA runs: nearest food, wall urgency, gentle rallies.
