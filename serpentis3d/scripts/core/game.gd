@@ -664,9 +664,9 @@ func _physics_process(delta: float) -> void:
 				# so the backdrop reads as the top-down board)
 				var focus := _demo_focus()
 				_cam_angle += delta * 0.08
-				var pos := focus + Vector3(cos(_cam_angle) * 42.0, 24.0, sin(_cam_angle) * 42.0)
+				var pos := focus + Vector3(cos(_cam_angle) * 46.0, 31.0, sin(_cam_angle) * 46.0)
 				if _gfx_mode == 0:
-					pos = focus + Vector3(cos(_cam_angle) * 22.0, 40.0, sin(_cam_angle) * 22.0)
+					pos = focus + Vector3(cos(_cam_angle) * 24.0, 44.0, sin(_cam_angle) * 24.0)
 				var look := focus + Vector3.UP * 2.0
 				_cam_pos = _cam_pos.lerp(pos, 1.0 - exp(-2.2 * delta))
 				_cam_look = _cam_look.lerp(look, 1.0 - exp(-2.2 * delta))
