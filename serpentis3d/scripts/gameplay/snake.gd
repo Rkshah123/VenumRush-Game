@@ -29,6 +29,7 @@ var accent := Color(0.95, 0.24, 0.6)
 var belly := Color(0.86, 0.78, 0.58)
 var skin_seed := 0.5
 var pattern := 0                  # 0 plain, 1 bands, 2 blotches, 3 zigzag, 4 stripes
+var rim := 0.0                   # fresnel edge light (dark theme / 2D mode visibility pass)
 var initial_length := 7.0
 var max_length := 58.0
 
@@ -88,6 +89,7 @@ var _flick_timer := 0.0
 var _flick_phase := 0.0
 var _lunge := 0.0                 # eating animation: quick head snap (0..1)
 var _pulse := 0.0                 # growth response: brief body thickening (0..1)
+var _eye_mats: Array[StandardMaterial3D] = []   # eyes — theme rim pass
 var head_vel := Vector3(0, 0, 1)     # world velocity of head (for AI prediction)
 
 # polyline ring buffer
@@ -455,6 +457,7 @@ func _build_body() -> void:
 	_mat.set_shader_parameter(&"u_tile_al", 0.62 * (_body_radius() / 0.56))
 	_mat.set_shader_parameter(&"u_scale", _scale_albedo)
 	_mat.set_shader_parameter(&"u_scale_n", _scale_normal)
+	_mat.set_shader_parameter(&"u_rim", rim)
 	_mat.set_shader_parameter(&"u_glow", 0.25 if is_boss else 0.0)
 	body_mi.mesh = mesh
 	body_mi.material_override = _mat
@@ -529,6 +532,7 @@ func _build_head() -> void:
 		mat.emission = Color(0.35, 0.22, 0.05)
 		mat.emission_energy_multiplier = 0.5
 		eye.material_override = mat
+		_eye_mats.append(mat)
 		head_root.add_child(eye)
 
 		# vertical slit pupil (viper-like) — a squashed ellipsoid over the eye
@@ -610,8 +614,27 @@ func _skin_mat(snout_flavor: bool, uv_cells: Vector2 = Vector2(2.6, 2.0)) -> Sta
 			m.normal_scale = 0.9
 	m.roughness = 0.34
 	m.metallic = 0.05
+	if rim > 0.0:
+		m.rim_enabled = true
+		m.rim = rim * 0.8
+		m.rim_tint = 0.5
 	_skin_mats.append([m, snout_flavor])
 	return m
+
+func set_rim(v: float) -> void:
+	# live theme visibility pass: fresnel edge light on body + head
+	rim = v
+	if _mat != null:
+		_mat.set_shader_parameter(&"u_rim", v)
+	for rec in _skin_mats:
+		var m: StandardMaterial3D = rec[0]
+		m.rim_enabled = v > 0.0
+		m.rim = v * 0.8
+		m.rim_tint = 0.5
+	for m2 in _eye_mats:
+		m2.rim_enabled = v > 0.0
+		m2.rim = v * 0.6
+		m2.rim_tint = 0.6
 
 func _head_tint(snout_flavor: bool) -> Color:
 	# head matches the body base so the neck seam disappears from above

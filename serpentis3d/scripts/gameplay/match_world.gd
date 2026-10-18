@@ -25,6 +25,8 @@ var last_kill_text := ""
 var player_cause := ""
 var running := false
 var demo_mode := false
+var gfx_mode := 1        # 0 = 2D top-down presentation, 1 = 3D / 2.5D
+var dark := false        # Dark Theme world pass (set by Game from settings)
 var no_death := false
 var solo_dev := false
 var skip_hud_dev := false
@@ -47,14 +49,39 @@ var _milestones := {}
 var _pers_cycle := 0
 
 func _ready() -> void:
-	arena = ArenaBuilder.new()
-	arena.arena_key = arena_key
-	add_child(arena)
-	obstacles = arena.obstacles
+	_build_arena()
 	food = FoodSpawner.new()
 	food.arena_radius = arena_radius
 	food.obstacles = obstacles
+	food.dark_theme = dark
+	food.mode_2d = gfx_mode == 0
 	add_child(food)
+
+func _build_arena() -> void:
+	arena = ArenaBuilder.new()
+	arena.arena_key = arena_key
+	arena.gfx_mode = gfx_mode
+	arena.dark = dark
+	add_child(arena)
+	obstacles = arena.obstacles
+
+func _rim_for() -> float:
+	# Theme visibility: edge light on snakes — strong on dark arenas, a touch
+	# more in the flat 2D board view.
+	return (0.55 if dark else 0.12) + (0.22 if gfx_mode == 0 else 0.0)
+
+func restyle(dark_v: bool, mode_2d: bool) -> void:
+	# live theme / graphics-mode switch (settings during a session)
+	dark = dark_v
+	gfx_mode = 0 if mode_2d else 1
+	if is_instance_valid(arena):
+		arena.queue_free()
+	_build_arena()
+	food.obstacles = obstacles
+	food.set_style(dark, mode_2d)
+	for s in snakes:
+		if is_instance_valid(s) and s.alive:
+			s.set_rim(_rim_for())
 
 # ------------------------------------------------------------------ lifecycle
 
@@ -124,6 +151,7 @@ func _attach(s: Snake, is_player: bool, start_len: float) -> void:
 	_next_id += 1
 	s.name = "Snake%d" % s.id
 	s.match_world = self
+	s.rim = _rim_for()
 	if demo_mode:
 		start_len = randf_range(8.0, 14.0)
 	# Opening fill (real matches): seat everyone on a tangent ring — equal
@@ -411,7 +439,7 @@ func _eat_checks() -> void:
 					AudioMgr.play("eat_gold")
 					match_event.emit("eat", "MAGNET PULSE" if ab == "magnet" else "SHIELD")
 					if hud != null and is_instance_valid(hud):
-						hud.push_score_popup_at("MAGNET PULSE" if ab == "magnet" else "SHIELD UP", GameHud.COL_WARN, h["pos"])
+						hud.push_score_popup_at("MAGNET PULSE" if ab == "magnet" else "SHIELD UP", GameHud.role_color("warn"), h["pos"])
 				s.eat_bite()
 				continue
 			if s.is_player:
@@ -419,7 +447,7 @@ func _eat_checks() -> void:
 				var sv := int(FoodSpawner.KIND_SCORE[k])
 				match_event.emit("eat", "+%d" % sv)
 				if hud != null and is_instance_valid(hud):
-					hud.push_score_popup_at("+%d" % sv, GameHud.COL_GOLD if k == 2 else GameHud.COL_ACCENT, h["pos"])
+					hud.push_score_popup_at("+%d" % sv, GameHud.role_color("gold") if k == 2 else GameHud.role_color("accent"), h["pos"])
 			s.eat(k, FoodSpawner.KIND_GROWTH[k], FoodSpawner.KIND_SCORE[k])
 			# fruit flies into the mouth; bite + burst are part of the event
 			food.fly_orb_at_pos(k, h["pos"], s)

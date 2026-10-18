@@ -55,6 +55,8 @@ const VAR_TABLE := [
 
 var arena_radius := 56.0
 var obstacles: Array = []     # [{pos, r}] for placement rejection
+var dark_theme := false       # Dark Theme: brighter emissives + rim so fruit pops
+var mode_2d := false          # 2D top-down mode: same contrast treatment
 
 var _slots: Array = []        # per kind: Array of pool dicts {mm, free, alive}
 var _var_caps: Array = []     # per kind: Array of capacities (deficit bookkeeping)
@@ -73,10 +75,7 @@ func _ready() -> void:
 		var pools: Array = []
 		var caps: Array = []
 		for cfg: Dictionary in VAR_TABLE[kind]:
-			var mesh: Mesh = _power_mesh() if cfg.get("power", false) else _real_fruit_mesh(
-				cfg["path"], float(cfg["h"]), float(cfg["emit"]), cfg.get("surface_map", {}))
-			var pool := _make_pool(mesh, int(cfg["cap"]))
-			pools.append(pool)
+			pools.append(_make_pool(_variant_mesh(kind, cfg), int(cfg["cap"])))
 			caps.append(int(cfg["cap"]))
 		_slots.append(pools)
 		_var_caps.append(caps)
@@ -102,6 +101,25 @@ func _ready() -> void:
 		m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		pop.add_child(m)
 		_pop_pool.append(pop)
+
+func set_style(dark: bool, two_d: bool) -> void:
+	# live theme / graphics-mode switch: swap the variant meshes (instances,
+	# scores and slots untouched) so emissives + rims match the new look
+	dark_theme = dark
+	mode_2d = two_d
+	if not is_inside_tree() or _slots.is_empty():
+		return
+	for kind in _slots.size():
+		var pools: Array = _slots[kind]
+		for vi in pools.size():
+			var cfg: Dictionary = VAR_TABLE[kind][vi]
+			var mm: MultiMesh = (pools[vi]["mm"] as MultiMesh)
+			mm.mesh = _variant_mesh(kind, cfg)
+
+func _variant_mesh(kind: int, cfg: Dictionary) -> Mesh:
+	if bool(cfg.get("power", false)):
+		return _power_mesh()
+	return _real_fruit_mesh(cfg["path"], float(cfg["h"]), float(cfg["emit"]), cfg.get("surface_map", {}), kind)
 
 func _make_pool(mesh: Mesh, cap: int) -> Dictionary:
 	var mm := MultiMesh.new()
@@ -348,12 +366,15 @@ func _process(delta: float) -> void:
 # needed — the pack carries every variant. Each final mesh = model surfaces +
 # ground shadow blob → ONE mesh.
 
-func _real_fruit_mesh(path: String, height: float, emit: float, surface_map: Dictionary) -> Mesh:
+func _real_fruit_mesh(path: String, height: float, emit: float, surface_map: Dictionary, kind: int) -> Mesh:
 	var src: Mesh = load(path) as Mesh
 	var am := ArrayMesh.new()
 	if src == null:
 		push_warning("Food model missing: %s — packing empty mesh" % path)
 		return am
+	# Dark Theme / 2D mode: extra emissive lift keeps fruit readable on the
+	# darkened courts (contrast audit requirement)
+	var emit_b := emit * (1.55 if dark_theme else (1.25 if mode_2d else 1.0))
 	var bb := src.get_aabb()
 	var sc: float = height / maxf(bb.size.y, 0.001)
 	var lift: float = -bb.position.y * sc
@@ -370,12 +391,7 @@ func _real_fruit_mesh(path: String, height: float, emit: float, surface_map: Dic
 		elif surface_map.has(nm):
 			st.set_material(_mapped_mat(surface_map[nm]))
 		else:
-			var kind_tint := Color(0.92, 0.16, 0.12)
-			for k in VAR_TABLE.size():
-				for cfg: Dictionary in VAR_TABLE[k]:
-					if cfg.get("path", "") == path:
-						kind_tint = KIND_COLORS[k]
-			st.set_material(_fruit_base_mat(kind_tint.lightened(0.08), emit, 0.34))
+			st.set_material(_fruit_base_mat(KIND_COLORS[kind].lightened(0.08), emit_b, 0.34))
 		st.commit(am)
 	var sbl := SurfaceTool.new()
 	_blob_surface(sbl)
@@ -427,12 +443,20 @@ func _fruit_base_mat(albedo: Color, emit: float, rough: float) -> StandardMateri
 	if emit > 0.0:
 		m.emission = albedo
 		m.emission_energy_multiplier = emit
+	if dark_theme or mode_2d:
+		m.rim_enabled = true
+		m.rim = 0.5
+		m.rim_tint = 0.6
 	return m
 
 func _stem_mat() -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = Color(0.30, 0.21, 0.11)
 	m.roughness = 0.92
+	if dark_theme or mode_2d:
+		m.rim_enabled = true
+		m.rim = 0.35
+		m.rim_tint = 0.6
 	return m
 
 func _leaf_mat(bright: Color = Color(0.26, 0.52, 0.18)) -> StandardMaterial3D:

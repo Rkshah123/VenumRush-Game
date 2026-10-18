@@ -32,6 +32,8 @@ var _lake_r := 13.0
 var _ember_mat: StandardMaterial3D
 var _tier := 1
 var _skip := 0
+var _dark := false                # Dark Theme arena pass
+var _mode_2d := false             # 2D top-down presentation pass
 
 # quality-tier counts [low, mid, high]
 const C_GRASS := [4500, 8000, 14000]
@@ -45,7 +47,7 @@ const C_DUST := [70, 110, 150]
 
 # ---------------------------------------------------------------- lifecycle
 
-func setup(preset: Dictionary, arena_r: float) -> void:
+func setup(preset: Dictionary, arena_r: float, mode_2d: bool = false, dark: bool = false) -> void:
 	_p = preset
 	_arena_r = arena_r
 	_seed = int(preset.get("seed", 101))
@@ -56,9 +58,19 @@ func setup(preset: Dictionary, arena_r: float) -> void:
 	_lake_pos = Vector3(sin(lake_a) * (_river_r + 12.0), 0.0, cos(lake_a) * (_river_r + 12.0))
 	_lake_r = 13.0 + _rng.randf() * 4.0
 	_tier = _pick_tier()
+	_mode_2d = mode_2d
+	_dark = dark
 
 func obtain_obstacles() -> Array:
 	return _obstacles
+
+## Dark Theme color transform: deep, cool-shifted tones that keep hue identity
+## so the court stays readable while the world recedes.
+func _dk(c: Color, f: float = 0.52) -> Color:
+	if not _dark:
+		return c
+	var dark := Color(c.r * f, c.g * f * 1.02, c.b * f * 1.15)
+	return dark.lerp(Color(0.030, 0.042, 0.075), 0.30)
 
 func _ready() -> void:
 	# perf bisect switch (dev): ENV_SKIP=1 court+sky, 2 +terrain rings,
@@ -80,6 +92,36 @@ func _ready() -> void:
 		_build_rocks()
 		_build_bushes_and_flowers()
 	_build_atmosphere()
+	_contrast_pass()
+
+## Theme visibility audit pass: every decor object (trees, stumps, rocks,
+## bushes, flowers, rim stones) keeps a lit rim and enough albedo contrast to
+## stay readable on the darkened courts — Dark Theme never swallows objects.
+func _contrast_pass() -> void:
+	if not _dark and not _mode_2d:
+		return
+	var rim := 0.45 if _dark else 0.22
+	var dim := 0.58 if _dark else 1.0
+	var seen := {}   # decor materials are shared across instances — tint once
+	var stack: Array[Node] = get_children()
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		stack.append_array(n.get_children())
+		if not (n is MeshInstance3D):
+			continue
+		var mi := n as MeshInstance3D
+		var mat := mi.material_override
+		if mat is StandardMaterial3D:
+			var sm := mat as StandardMaterial3D
+			var key := sm.get_instance_id()
+			if seen.has(key):
+				continue
+			seen[key] = true
+			if sm.shading_mode != BaseMaterial3D.SHADING_MODE_UNSHADED and sm != _ember_mat:
+				sm.albedo_color = sm.albedo_color * dim
+				sm.rim_enabled = true
+				sm.rim = rim
+				sm.rim_tint = 0.6
 
 func _process(delta: float) -> void:
 	if _ember_mat != null:
@@ -178,25 +220,25 @@ func _in_water(x: float, z: float, pad := 2.5) -> bool:
 
 func _terrain_color(x: float, z: float, ny: float) -> Color:
 	# fg cells must exceed vertex spacing (~3 m) to avoid quilt banding
-	var col := Color(_p["grass_a"]).lerp(Color(_p["grass_b"]), _fbm2(x, z, 3, 11.0))
+	var col := _dk(Color(_p["grass_a"])).lerp(_dk(Color(_p["grass_b"])), _fbm2(x, z, 3, 11.0))
 	var dirtiness := clampf(_fbm2(x + 40.0, z - 17.0, 3, 15.0) * 1.4 - 0.6, 0.0, 1.0)
-	col = col.lerp(Color(_p["dirt"]), dirtiness * 0.55)
+	col = col.lerp(_dk(Color(_p["dirt"])), dirtiness * 0.55)
 	var rocky := clampf(pow(1.0 - ny, 1.8) * 2.2, 0.0, 1.0)
-	col = col.lerp(Color(_p["rock"]), rocky * 0.75)
+	col = col.lerp(_dk(Color(_p["rock"])), rocky * 0.75)
 	var h := _height(x, z)
 	var snowline := 34.0 + _fbm2(x, z, 2, 13.0) * 10.0
 	if h > snowline:
-		col = col.lerp(Color(0.86, 0.88, 0.92), clampf((h - snowline) / 6.0, 0.0, 0.85))
+		col = col.lerp(_dk(Color(0.86, 0.88, 0.92), 0.62), clampf((h - snowline) / 6.0, 0.0, 0.85))
 	elif h > 18.0:
-		col = col.lerp(Color(_p["rock"]).lightened(0.25), clampf((h - 18.0) / 14.0, 0.0, 0.7))
+		col = col.lerp(_dk(Color(_p["rock"]).lightened(0.25)), clampf((h - 18.0) / 14.0, 0.0, 0.7))
 	if _has_water:
 		var wet := 1.0 - clampf((h - _water_level) / 1.9, 0.0, 1.0)
-		col = col.lerp(Color(_p["cliff"]).darkened(0.25), clampf(wet * 0.8, 0.0, 0.8))
+		col = col.lerp(_dk(Color(_p["cliff"]).darkened(0.25)), clampf(wet * 0.8, 0.0, 0.8))
 	return col
 
 func _court_color(x: float, z: float) -> Color:
-	var g_a := Color(_p["grass_a"])
-	var g_b := Color(_p["grass_b"])
+	var g_a := _dk(Color(_p["grass_a"]))
+	var g_b := _dk(Color(_p["grass_b"]))
 	var d := sqrt(x * x + z * z)
 	var t := clampf(d / _arena_r, 0.0, 1.0)
 	# fg cells must be LARGER than vertex spacing (~2 m) or per-vertex colors
@@ -207,7 +249,7 @@ func _court_color(x: float, z: float) -> Color:
 	col = col.lerp(g_b.lightened(0.09), 0.22 * band)
 	col = col.lerp(col.darkened(0.09), 0.26 * (1.0 - band))
 	var wear := clampf(_fbm2(x + 91.0, z - 53.0, 3, 13.0) * 1.5 - 0.75, 0.0, 1.0)
-	col = col.lerp(Color(_p["dirt"]), wear * 0.40)
+	col = col.lerp(_dk(Color(_p["dirt"])), wear * 0.40)
 	col = col.lerp(col.darkened(0.38), smoothstep(0.84, 1.0, t) * 0.55)
 	return col
 
@@ -287,8 +329,9 @@ func _terrain_material() -> ShaderMaterial:
 
 func _build_sky_and_lights() -> void:
 	var sun := DirectionalLight3D.new()
-	sun.light_color = _p["sun_color"]
-	sun.light_energy = _p["sun_energy"]
+	sun.light_color = _dk(Color(_p["sun_color"]), 0.72).lerp(Color(0.72, 0.80, 1.0), 0.35) if _dark else Color(_p["sun_color"])
+	var sun_e := float(_p["sun_energy"]) * (0.62 if _dark else 1.0) * (0.88 if _mode_2d else 1.0)
+	sun.light_energy = sun_e
 	var yaw := float(_p["sun_yaw"])
 	var pitch := float(_p["sun_pitch"])
 	sun.rotation_degrees = Vector3(-pitch, yaw, 0.0)
@@ -303,33 +346,45 @@ func _build_sky_and_lights() -> void:
 	var sky := Sky.new()
 	var skym := ShaderMaterial.new()
 	skym.shader = SKY_SHADER
-	skym.set_shader_parameter("u_top", _p["sky_top"])
-	skym.set_shader_parameter("u_horizon", _p["sky_hz"])
-	skym.set_shader_parameter("u_sun_color", _p["sun_color"])
+	var sky_top: Color = _dk(Color(_p["sky_top"]), 0.30) if _dark else Color(_p["sky_top"])
+	var sky_hz: Color = _dk(Color(_p["sky_hz"]), 0.34) if _dark else Color(_p["sky_hz"])
+	if _dark:
+		# deep indigo night-sky gradient — dark but never flat black
+		sky_top = Color(0.020, 0.030, 0.085)
+		sky_hz = Color(0.070, 0.075, 0.170)
+	skym.set_shader_parameter("u_top", sky_top)
+	skym.set_shader_parameter("u_horizon", sky_hz)
+	skym.set_shader_parameter("u_sun_color", sun.light_color)
 	var yr := deg_to_rad(yaw)
 	var pr := deg_to_rad(pitch)
 	var sun_dir := Vector3(sin(yr), cos(yr) * sin(pr), cos(yr) * cos(pr)).normalized()
 	skym.set_shader_parameter("u_sun_dir", sun_dir)
-	var night := bool(_p.get("night", false))
+	var night := bool(_p.get("night", false)) or _dark
 	skym.set_shader_parameter("u_cloud", 0.55 if night else 1.0)
 	sky.sky_material = skym
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = _p["ambient"]
-	env.ambient_light_energy = _p["ambient_energy"]
+	if _dark:
+		env.ambient_light_color = Color(0.24, 0.30, 0.48)
+		env.ambient_light_energy = float(_p["ambient_energy"]) * 0.85
+	else:
+		env.ambient_light_color = _p["ambient"]
+		env.ambient_light_energy = _p["ambient_energy"]
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.tonemap_exposure = 1.08 if night else 1.0
+	if _dark:
+		env.tonemap_exposure = 1.22   # lift shadows so nothing sinks to pure black
 	env.fog_enabled = false
 	env.fog_mode = Environment.FOG_MODE_DEPTH
-	env.fog_light_color = _p["fog_color"]
+	env.fog_light_color = _dk(Color(_p["fog_color"]), 0.4) if _dark else Color(_p["fog_color"])
 	env.fog_depth_begin = 60.0
 	env.fog_depth_end = 300.0
 	env.fog_depth_curve = 1.15
 	env.fog_sky_affect = 0.05
 	env.glow_enabled = night
-	env.glow_intensity = 0.6
-	env.glow_bloom = 0.08
-	env.glow_hdr_threshold = 1.05
+	env.glow_intensity = 0.9 if _dark else 0.6
+	env.glow_bloom = 0.12 if _dark else 0.08
+	env.glow_hdr_threshold = 0.95 if _dark else 1.05
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
@@ -381,19 +436,21 @@ func _build_rim_stones() -> void:
 		rock.rotation.y = _rng.randf() * TAU
 		add_child(rock)
 	# ember boundary ring — gameplay readability at the kill radius
+	# (brighter/thicker under Dark Theme so the wall never gets lost)
 	var ember := MeshInstance3D.new()
 	var et := TorusMesh.new()
-	et.inner_radius = _arena_r - 0.10
-	et.outer_radius = _arena_r + 0.10
+	var ring_w := 0.20 if _dark else 0.10
+	et.inner_radius = _arena_r - ring_w
+	et.outer_radius = _arena_r + ring_w
 	et.rings = 72
 	et.ring_segments = 3
 	ember.mesh = et
 	_ember_mat = StandardMaterial3D.new()
 	_ember_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_ember_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_ember_mat.albedo_color = Color(1.0, 0.38, 0.14, 0.6)
+	_ember_mat.albedo_color = Color(1.0, 0.38, 0.14, 0.85 if _dark else 0.6)
 	_ember_mat.emission_enabled = true
-	_ember_mat.emission = Color(1.0, 0.32, 0.08)
+	_ember_mat.emission = Color(1.0, 0.32, 0.08) if not _dark else Color(1.0, 0.45, 0.16)
 	_ember_mat.emission_energy_multiplier = 1.0
 	ember.material_override = _ember_mat
 	ember.position.y = 0.10

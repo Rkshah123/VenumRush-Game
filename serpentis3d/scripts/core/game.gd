@@ -11,6 +11,8 @@ var state := State.MENU
 var _arena_key := "valley"
 var _cam_angle := 0.0
 var _cam_pos := Vector3(0, 18, 38)
+var _gfx_mode := 1               # 0 = 2D top-down, 1 = 3D / 2.5D (settings)
+var _theme_id := 0               # UiTheme.CLASSIC / DARK (settings)
 var _topdown_dist := 0.0        # fixed camera distance fitting the whole arena
 var _topdown_dirty := true
 var _cam_look := Vector3.ZERO
@@ -21,6 +23,8 @@ var _autoplay := false
 var _closeup := false
 var _shot_menu := false
 var _shot_skins := false
+var _shot_settings := false
+var _theme_test := false
 var _shot_game := false
 var _quit_at := -1.0
 var _no_death_dev := false
@@ -83,21 +87,30 @@ func _ready() -> void:
 		if a == "--skins-test":
 			_autoplay = true
 			_skins_test = true
+		if a == "--theme-test":
+			_autoplay = true
+			_theme_test = true
 	_arena_key = str(SaveMgr.get_value("arena", "valley"))
 	if arena_dev != "" and ArenaPresets.ALL.has(arena_dev):
 		_arena_key = arena_dev
 	elif not ArenaPresets.ALL.has(_arena_key):
 		_arena_key = "valley"
+	_gfx_mode = int(SaveMgr.get_value("gfx_mode", 1))
+	_theme_id = int(SaveMgr.get_value("theme", UiTheme.CLASSIC))
 	hud = GameHud.new()
 	add_child(hud)
 	match_world = MatchWorld.new()
 	match_world.hud = hud
 	match_world.arena_key = _arena_key
+	match_world.gfx_mode = _gfx_mode
+	match_world.dark = _theme_id == UiTheme.DARK
 	add_child(match_world)
 	match_world.match_event.connect(hud.push_feed)
 	match_world.player_died.connect(_on_player_died)
 	hud.set_arena(_arena_key)
 	hud.arena_shift.connect(_on_arena_shift)
+	hud.theme_changed.connect(_on_theme_changed)
+	hud.mode_changed.connect(_on_mode_changed)
 
 	cam = Camera3D.new()
 	cam.fov = 55.0
@@ -132,7 +145,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test", "--mode=2d", "--mode=3d"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -141,6 +154,8 @@ func _collect_dev_args() -> Array[String]:
 				_shot_menu = true
 			if src == "--shot-skins":
 				_shot_skins = true
+			if src == "--shot-settings":
+				_shot_settings = true
 		elif src.begins_with("--arena="):
 			keep = true
 			var k := src.substr(8)
@@ -149,6 +164,18 @@ func _collect_dev_args() -> Array[String]:
 		elif src.begins_with("--skin="):
 			keep = true
 			_skin_dev = clampi(int(src.substr(7)), 0, SkinCatalog.count() - 1)
+		elif src.begins_with("--theme="):
+			keep = true
+			_theme_id = clampi(int(src.substr(8)), 0, UiTheme.NAMES.size() - 1)
+			SaveMgr.set_value("theme", _theme_id)
+		elif src == "--mode=2d" or src.begins_with("--mode=2"):
+			keep = true
+			_gfx_mode = 0
+			SaveMgr.set_value("gfx_mode", 0)
+		elif src == "--mode=3d" or src.begins_with("--mode=3"):
+			keep = true
+			_gfx_mode = 1
+			SaveMgr.set_value("gfx_mode", 1)
 		elif src == "--closeup" or src.begins_with("--closeup="):
 			keep = true
 		elif src.begins_with("--shot="):
@@ -177,6 +204,9 @@ func _dev_sequence() -> void:
 		# skins screen QA: menu-page switch, live preview, unlock gates, persistence
 		await _skins_test_run()
 		return
+	if _theme_test:
+		await _theme_test_run()
+		return
 	if _shot_menu:
 		await _snap("shot_menu.png")
 	if _shot_skins:
@@ -184,6 +214,12 @@ func _dev_sequence() -> void:
 		hud._menu_page("skins")
 		await get_tree().create_timer(1.2).timeout
 		await _snap("shot_skins.png")
+		_quit_nicely()
+		return
+	if _shot_settings:
+		hud._menu_page("settings")
+		await get_tree().create_timer(0.8).timeout
+		await _snap("shot_settings.png")
 		_quit_nicely()
 		return
 	await get_tree().create_timer(0.6).timeout
@@ -305,6 +341,36 @@ func _skins_test_run() -> void:
 	print("SKINTEST restored now=%d" % int(SaveMgr.get_value("skin", 0)))
 	_quit_nicely()
 
+# ---------------------------------------------------------------- theme QA
+
+func _theme_test_run() -> void:
+	# Dark Theme + graphics-mode QA: palette contrast report, both themes
+	# applied to the live UI, persistence, and mode switching through the
+	# real settings signal path (no gameplay state is touched).
+	print(UiTheme.theme_report())
+	for t in 2:
+		SaveMgr.set_value("theme", t)
+		hud.apply_theme(t)
+		await get_tree().process_frame
+		print("THEMETEST applied=%s accent=%s" % [UiTheme.theme_name(t), str(UiTheme.c("accent"))])
+		if not is_equal_approx(UiTheme.c("accent").get_luminance(), UiTheme.c("accent").get_luminance()):
+			print("THEMETEST FAIL accent")
+			_quit_nicely()
+			return
+	for m in 2:
+		hud.mode_changed.emit(m)
+		await get_tree().process_frame
+		print("THEMETEST mode=%d cam_tilt_dirty=%s saved=%d" % [m, str(_topdown_dirty), int(SaveMgr.get_value("gfx_mode", 1))])
+	hud.theme_changed.emit(UiTheme.DARK)
+	await get_tree().process_frame
+	print("THEMETEST dark-world=%s rim=%.2f" % [str(match_world.dark), match_world._rim_for()])
+	# restore defaults so QA never leaves the player's save dirty
+	SaveMgr.set_value("theme", UiTheme.CLASSIC)
+	SaveMgr.set_value("gfx_mode", 1)
+	hud.apply_theme(UiTheme.CLASSIC)
+	print("THEMETEST done — PASS")
+	_quit_nicely()
+
 # ---------------------------------------------------------------- power QA
 
 func _powertest_run() -> void:
@@ -401,12 +467,38 @@ func _on_arena_shift(dir: int) -> void:
 	_rebuild_world()
 	match_world.start_demo()
 
+func _on_theme_changed(id: int) -> void:
+	# Dark Theme: retint the running world instantly (UI already applied by
+	# the HUD). Rebuilding re-bakes court/terrain/sky/decor for the palette.
+	_theme_id = id
+	SaveMgr.set_value("theme", id)
+	match_world.dark = id == UiTheme.DARK
+	if state == State.MENU:
+		_rebuild_world()
+		match_world.start_demo()
+	else:
+		match_world.restyle(id == UiTheme.DARK, _gfx_mode == 0)
+
+func _on_mode_changed(id: int) -> void:
+	# Graphics mode: 0 = 2D top-down, 1 = 3D / 2.5D. Persisted by the HUD.
+	_gfx_mode = id
+	SaveMgr.set_value("gfx_mode", id)
+	_topdown_dirty = true
+	match_world.gfx_mode = id
+	if state == State.MENU:
+		_rebuild_world()
+		match_world.start_demo()
+	else:
+		match_world.restyle(match_world.dark, id == 0)
+
 func _rebuild_world() -> void:
 	if is_instance_valid(match_world):
 		match_world.queue_free()
 	match_world = MatchWorld.new()
 	match_world.hud = hud
 	match_world.arena_key = _arena_key
+	match_world.gfx_mode = _gfx_mode
+	match_world.dark = _theme_id == UiTheme.DARK
 	add_child(match_world)
 	match_world.match_event.connect(hud.push_feed)
 	match_world.player_died.connect(_on_player_died)
@@ -568,7 +660,8 @@ func _topdown_camera(delta: float) -> void:
 	if _topdown_dirty or _topdown_dist <= 0.0:
 		_topdown_fit()
 	cam.fov = 55.0
-	var tilt := 0.36  # radians from vertical — enough for depth, keeps fit stable
+	# Graphics mode: 2D = near straight-down board view; 3D = tilted cinematic.
+	var tilt := 0.36 if _gfx_mode == 1 else 0.055
 	var dir := Vector3(0.0, cos(tilt), sin(tilt))
 	var desired := Vector3.ZERO + dir * _topdown_dist
 	# ease toward the fixed pose (nice slide after the cinematic menu orbit)
@@ -582,7 +675,7 @@ func _topdown_fit() -> void:
 	# Bisection on the camera distance so every rim point of the play circle
 	# fits inside the frustum (both axes) with a small margin. Re-run on resize.
 	var R: float = match_world.arena_radius + 3.0
-	var tilt := 0.36
+	var tilt := 0.36 if _gfx_mode == 1 else 0.055
 	var dir := Vector3(0.0, cos(tilt), sin(tilt))     # camera sits south of center
 	var view := -dir                                  # looking north/down
 	var right := Vector3(1.0, 0.0, 0.0)

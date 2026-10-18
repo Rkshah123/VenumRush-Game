@@ -28,6 +28,8 @@ uniform float u_rep_ar = 5.0;         // texture repeats around the circumferenc
 uniform float u_tile_al = 0.62;       // meters along the body per texture tile
 uniform float u_motion = 1.0;         // 0..1.3 — movement energy
 uniform float u_glow = 0.0;
+uniform float u_rim = 0.0;             // fresnel edge light — keeps snakes
+                                      // readable on dark arenas (theme pass)
 uniform float u_dbg = 0.0;            // dev: flat ribbon diagnostic (bypasses spine texture)
 
 varying vec3 v_axis;
@@ -142,5 +144,9 @@ void fragment() {
 	ALBEDO = col;
 	ROUGHNESS = clamp(0.30 + 0.30 * (1.0 - sv) + 0.14 * belly_f + 0.10 * pat_m, 0.2, 0.85);
 	SPECULAR = 0.48;
-	EMISSION = u_accent.rgb * (u_glow * (0.25 + 0.4 * dorsal_line + pat_m * 0.2));
+	// Theme visibility pass: fresnel edge light in the snake's accent color so
+	// bodies never merge into dark arenas / 2D backgrounds.
+	float fres = pow(1.0 - abs(dot(normalize(N), normalize(VIEW))), 3.0);
+	EMISSION = u_accent.rgb * (u_glow * (0.25 + 0.4 * dorsal_line + pat_m * 0.2))
+		+ mix(u_accent.rgb, vec3(1.0), 0.35) * u_rim * fres * 0.9;
 }

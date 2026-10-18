@@ -13,6 +13,8 @@ const DEFAULTS := {
 	"fullscreen": false,
 	"tutorial_seen": false,
 	"skin": 0,
+	"theme": 0,
+	"gfx_mode": 1,   # 0 = 2D top-down, 1 = 3D/2.5D (default keeps the 3D look)
 }
 
 var data: Dictionary = {}
