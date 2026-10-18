@@ -13,6 +13,7 @@ var _is_mobile := false
 var _touch_pos := Vector2.ZERO
 var _touch_has := false
 var _touch_ids := {}          # touch index -> alive (second finger = boost)
+var _idle_t := 0.0            # time since the last steering input
 
 func _ready() -> void:
 	is_player = true
@@ -58,9 +59,18 @@ func _steer(delta: float) -> void:
 		# zone = hold straight ahead (keeps the snake from fishing the last
 		# command forever)
 		var off := _steer_offset_from(_touch_pos, cam) if _touch_has and cam else Vector2.ZERO
-		if cam and off != Vector2.ZERO:
+		if off != Vector2.ZERO:
+			_idle_t = 0.0
 			desired_dir = _screen_offset_to_dir(off, cam)
-		elif cam:
+		else:
+			# Idle drift: while the fingers have not found the screen yet, carve
+			# a wide arena-safe arc (curving toward the center near the wall)
+			# instead of driving a straight line into the snake ahead.
+			_idle_t += delta
+			if _idle_t > 1.2:
+				desired_dir = _idle_drift_dir(delta)
+				input_boost = _touch_ids.size() >= 2
+				return
 			desired_dir = Vector3(sin(heading), 0.0, cos(heading))
 		input_boost = _touch_ids.size() >= 2
 		return
@@ -85,6 +95,22 @@ func _steer(delta: float) -> void:
 		desired_dir = desired if desired.length_squared() > 0.9 else desired.normalized()
 
 	input_boost = Input.is_key_pressed(KEY_SPACE) or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+
+func _idle_drift_dir(delta: float) -> Vector3:
+	# Wide, gentle arc that mostly follows the spawn flow (everyone slides
+	# tangentially, so a parallel arc keeps a constant gap); the curve leans
+	# toward the arena center as the wall closes in.
+	var fwd := Vector3(sin(heading), 0.0, cos(heading))
+	var radial := head_pos.length()
+	var turn := 0.4
+	if match_world != null and radial > match_world.arena_radius * 0.55:
+		var inward := -head_pos
+		inward.y = 0.0
+		if inward.length_squared() > 0.01:
+			inward = inward.normalized()
+			var cross_y := fwd.x * inward.z - fwd.z * inward.x
+			turn = 0.7 * (1.0 if cross_y >= 0.0 else -1.0)
+	return fwd.rotated(Vector3.UP, turn * delta)
 
 func _screen_offset_to_dir(off: Vector2, cam: Camera3D) -> Vector3:
 	# Screen-offset → world direction. off.y < 0 = pointer BELOW center =
@@ -128,6 +154,16 @@ func _autopilot_steer() -> void:
 				if d.length_squared() < 0.02:
 					d = probe * -1.0
 				desired += d.normalized() * (1.2 + (rr - d.length()) * 0.55)
+		# other snakes' bodies are lethal — dodge nearby stations
+		if match_world != null:
+			for st in match_world.nearby_stations(head_pos, 7.0, id):
+				var sd: Vector3 = head_pos - (st["pos"] as Vector3)
+				sd.y = 0.0
+				var dd := sd.length()
+				if dd < 0.05:
+					sd = -probe
+					dd = 1.0
+				desired += sd.normalized() * (2.2 + (7.0 - dd) * 0.5)
 		if desired.length_squared() < 0.01:
 			var fwd := Vector3(sin(heading), 0.0, cos(heading))
 			desired = fwd.rotated(Vector3.UP, 0.1)

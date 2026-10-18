@@ -138,12 +138,10 @@ func _attach(s: Snake, is_player: bool, start_len: float) -> void:
 	var rad: float
 	if ring_slot >= 0:
 		ang = _spawn_base_ang + TAU * ring_slot / float(total_for_ring)
-		# ring seats must not share a boulder: drift the seat outward/inward
-		# with alternating growing steps until the neighborhood is clear.
-		# Alternating base bands double the distance between successive seats
-		# and stop the ring from degenerating into a single-file tangent
-		# parade (followers nose into the snake ahead when speeds differ).
-		var rr: float = arena_radius * (0.66 if ring_slot % 2 == 0 else 0.44)
+		# Ring seats all share ONE circle: equal-speed tangential motion then
+		# preserves the angular gaps (different radius bands converge and
+		# cross lanes). Seat drift below keeps boulders out of the seat.
+		var rr: float = arena_radius * 0.58
 		var good := false
 		for attempt in 14:
 			var probe := Vector3(sin(ang) * rr, 0.0, cos(ang) * rr)
