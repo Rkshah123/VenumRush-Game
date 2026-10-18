@@ -1011,6 +1011,8 @@ func _nav_button(text: String) -> Button:
 func _menu_button(parent: Node, text: String, on_press: Callable, primary: bool = false) -> Button:
 	var b := Button.new()
 	b.text = text
+	# never take keyboard focus: focused buttons swallow arrow keys during play
+	b.focus_mode = Control.FOCUS_NONE
 	# mobile-first touch targets: 54 px rows / 74 px primary (spec section 4)
 	var mob := _is_touch_device()
 	var row_h := (72 if primary else 54) if mob else (62 if primary else 44)

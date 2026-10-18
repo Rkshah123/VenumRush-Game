@@ -1,10 +1,13 @@
 class_name PlayerSnake
 extends Snake
-## Player-controlled snake: steer toward pointer (or keys), boost via Space/Left Mouse.
-## Android touch: ONE finger drag steers toward the finger (relative to screen
-## center, same projection as the mouse); a SECOND finger anywhere = boost.
+## Player-controlled snake: steer toward pointer, WASD/arrow keys, or the
+## PUBG-style virtual joystick. Boost via Space / Left Mouse / a second finger.
+## Android touch: the joystick (bottom-left) steers; a drag anywhere else steers
+## toward the finger (relative to screen center, same projection as the mouse);
+## a SECOND finger anywhere = boost.
 
-var _key_yaw := 0.0
+var _keys_dir := Vector2.ZERO   # WASD/arrows, screen space (x right, y up)
+var _keys_held := {}            # keycode -> true (avoids press/release cancels)
 var autopilot := false        # dev autoplay: seek food, avoid walls, live long
 
 # --- touch state (mobile) ---
@@ -16,20 +19,45 @@ var _touch_ids := {}          # touch index -> alive (second finger = boost)
 var _idle_t := 0.0            # time since the last steering input
 var joy_active := false       # virtual joystick currently held
 var joy_vec := Vector2.ZERO   # joystick direction (screen space, y up)
+var no_idle_drift := false    # virtual joystick is active — player steers
+var keyboard_only := false    # dev QA: ignore pointer/touch, keys only
 
 func _ready() -> void:
 	is_player = true
 	_is_mobile = OS.has_feature("android") or OS.has_feature("ios") or touch_sim
 	super._ready()
 
+func _input(event: InputEvent) -> void:
+	# Keyboard direction keys (WASD + arrows) are captured in the RAW input
+	# phase so focused UI controls can never swallow them — this is why
+	# Up/Down used to "do nothing" after clicking through the menus.
+	if autopilot or not (event is InputEventKey):
+		return
+	var k := event as InputEventKey
+	if _key_dir_for(k.keycode) == Vector2.ZERO:
+		return
+	_key_input(event)
+	if k.pressed:
+		get_viewport().set_input_as_handled()   # no scrolling / focus moves
+
 func _unhandled_input(event: InputEvent) -> void:
-	if not _is_mobile or autopilot:
+	if autopilot:
+		return
+	# Keyboard direction keys work in BOTH desktop and mobile layouts (and on
+	# a connected keyboard on Android) — handled before the touch branch.
+	if event is InputEventKey:
+		_key_input(event)
+		if event.is_pressed() and (event as InputEventKey).keycode in [KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_W, KEY_A, KEY_S, KEY_D]:
+			get_viewport().set_input_as_handled()   # never scroll / move focus
+		return
+	if not _is_mobile:
 		return
 	if event is InputEventScreenTouch:
 		if (event as InputEventScreenTouch).pressed:
 			_touch_ids[(event as InputEventScreenTouch).index] = true
 			_touch_pos = (event as InputEventScreenTouch).position
 			_touch_has = true
+			_idle_t = 0.0
 		else:
 			_touch_ids.erase((event as InputEventScreenTouch).index)
 			if _touch_ids.is_empty():
@@ -37,6 +65,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event is InputEventScreenDrag:
 		_touch_pos = (event as InputEventScreenDrag).position
 		_touch_has = true
+		_idle_t = 0.0
 
 func _steer_offset_from(p: Vector2, cam: Camera3D) -> Vector2:
 	# Shared projection: screen offset from center, clamped, dead-zoned.
@@ -53,10 +82,9 @@ func _steer(delta: float) -> void:
 		_autopilot_steer()
 		return
 	var cam := get_viewport().get_camera_3d()
+	var keys := _keys_dir
 
-	# --- steering ---
-	var desired := Vector3.ZERO
-	if _is_mobile:
+	if _is_mobile and keys == Vector2.ZERO and not keyboard_only:
 		# PUBG-style virtual joystick (mobile 2D): while a finger holds the
 		# stick it steers; otherwise the classic drag-steer path runs. A
 		# SECOND finger anywhere still boosts (spec section 2).
@@ -69,11 +97,12 @@ func _steer(delta: float) -> void:
 		elif cam and off != Vector2.ZERO:
 			desired_dir = _screen_offset_to_dir(off, cam)
 		elif cam:
-			# Idle drift: while the fingers have not found the screen yet, carve
-			# a wide arena-safe arc (curving toward the center near the wall)
-			# instead of driving a straight line into the snake ahead.
+			# Idle drift: carve a wide arena-safe arc so an untouched phone
+			# never drives straight into a wall. Never while the virtual
+			# joystick is available - there the player is in charge and an
+			# auto-arc would fight them (and looked like "circling").
 			_idle_t += delta
-			if _idle_t > 1.2:
+			if _idle_t > 1.2 and not no_idle_drift:
 				desired_dir = _idle_drift_dir(delta)
 				input_boost = _touch_ids.size() >= 2
 				return
@@ -81,26 +110,79 @@ func _steer(delta: float) -> void:
 		input_boost = _touch_ids.size() >= 2
 		return
 
+	# --- desktop (or a keyboard on a phone): pointer OR direction keys ---
+	var desired := Vector3.ZERO
 	var off := Vector2.ZERO
-	if cam:
+	if cam and not keyboard_only:
 		off = _steer_offset_from(get_viewport().get_mouse_position(), cam)
 
-	if cam and off != Vector2.ZERO:
+	# Direction keys are ABSOLUTE screen-relative directions (never a relative
+	# yaw offset - that made the snake circle forever). W/Up = up-screen,
+	# S/Down = down-screen, A/Left = left, D/Right = right.
+	if keys != Vector2.ZERO:
+		if cam:
+			desired = _screen_offset_to_dir(Vector2(keys.x, -keys.y) * 0.5, cam)
+		else:
+			desired = Vector3(keys.x, 0.0, -keys.y)
+	elif cam and off != Vector2.ZERO:
 		desired = _screen_offset_to_dir(off, cam)
-	else:
-		# keyboard fallback (A/D) if no camera or pointer centered
-		var k := 0.0
-		if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
-			k -= 1.0
-		if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
-			k += 1.0
-		_key_yaw = wrapf(_key_yaw - k * 2.4 * delta, -PI, PI)
-		desired = Vector3(sin(heading + _key_yaw), 0.0, cos(heading + _key_yaw))
 
 	if desired != Vector3.ZERO:
 		desired_dir = desired if desired.length_squared() > 0.9 else desired.normalized()
 
-	input_boost = Input.is_key_pressed(KEY_SPACE) or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+	if _is_mobile:
+		input_boost = _touch_ids.size() >= 2
+	else:
+		input_boost = Input.is_key_pressed(KEY_SPACE) or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+
+## Key events -> absolute screen-space direction (x right, y up). Event-based
+## so it works regardless of focus quirks and can be driven by QA tests.
+func _key_input(event: InputEvent) -> void:
+	if not (event is InputEventKey):
+		return
+	var k := event as InputEventKey
+	var d := _key_dir_for(k.keycode)
+	if d == Vector2.ZERO:
+		return
+	if k.echo:
+		return
+	_key_set(k.keycode, k.pressed)
+
+func _key_dir_for(code: int) -> Vector2:
+	match code:
+		KEY_A, KEY_LEFT:
+			return Vector2(-1, 0)
+		KEY_D, KEY_RIGHT:
+			return Vector2(1, 0)
+		KEY_W, KEY_UP:
+			return Vector2(0, 1)
+		KEY_S, KEY_DOWN:
+			return Vector2(0, -1)
+	return Vector2.ZERO
+
+func _key_set(code: int, down: bool) -> void:
+	var d := _key_dir_for(code)
+	if d == Vector2.ZERO:
+		return
+	# Per-key state, not accumulation: holding A and Left together and
+	# releasing one must not cancel the other.
+	if down:
+		_keys_held[code] = true
+		_idle_t = 0.0
+	else:
+		_keys_held.erase(code)
+	var sum := Vector2.ZERO
+	for c in _keys_held:
+		sum += _key_dir_for(c)
+	_keys_dir = sum.limit_length(1.0)
+
+## QA hook: press/release a key by code through the real input path.
+func press_key(code: int, down: bool = true) -> void:
+	_key_set(code, down)
+
+func clear_keys() -> void:
+	_keys_held.clear()
+	_keys_dir = Vector2.ZERO
 
 func _idle_drift_dir(delta: float) -> Vector3:
 	# Wide, gentle arc that mostly follows the spawn flow (everyone slides

@@ -28,6 +28,7 @@ var _touch_id := -99           # -99 = free, >=0 touch index, -2 mouse
 var _knob := Vector2.ZERO      # knob offset from center (px)
 var _safe_left := 0.0
 var _safe_bottom := 0.0
+var _base_center := Vector2.ZERO   # stick base (moves to the finger on zone grabs)
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE   # manual hit-testing
@@ -39,17 +40,38 @@ func configure(scale_px: float, safe_left: float, safe_bottom: float) -> void:
 	ui_scale = clampf(scale_px, 0.8, 1.9)
 	_safe_left = safe_left
 	_safe_bottom = safe_bottom
+	var r := BASE_RADIUS * ui_scale
+	var vs := size
+	if vs.y < 1.0:
+		vs = get_viewport_rect().size
+	_base_center = Vector2(safe_left + r + MARGIN * ui_scale,
+		vs.y - safe_bottom - r - MARGIN * ui_scale)
 	queue_redraw()
 
 func radius() -> float:
 	return BASE_RADIUS * ui_scale
 
 func center() -> Vector2:
+	return _base_center
+
+## A touch that starts outside the ring but inside the left activation zone
+## re-centers the stick under the finger (PUBG-like forgiveness): the player
+## never has to hit the small ring exactly, so a drag next to the stick
+## always steers instead of letting the snake idle in circles.
+func _in_activation_zone(local: Vector2) -> bool:
 	var vs := size
 	if vs.y < 1.0:
 		vs = get_viewport_rect().size
-	return Vector2(_safe_left + radius() + MARGIN * ui_scale,
-		vs.y - _safe_bottom - radius() - MARGIN * ui_scale)
+	return local.x < vs.x * 0.62 and local.y > vs.y * 0.22
+
+func _grab(local: Vector2) -> void:
+	if local.distance_to(center()) <= radius() * 1.3:
+		_update_from(local)          # inside the ring: fixed base
+	else:
+		_base_center = local        # zone touch: stick jumps under the finger
+		_knob = Vector2.ZERO
+		value = Vector2.ZERO
+		_update_from(local)
 
 func _to_local(p: Vector2) -> Vector2:
 	return get_global_transform().affine_inverse() * p
@@ -60,10 +82,11 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventScreenTouch:
 		var t := event as InputEventScreenTouch
 		if t.pressed and _touch_id == -99:
-			if _to_local(t.position).distance_to(center()) <= radius() * 1.3:
+			var local := _to_local(t.position)
+			if local.distance_to(center()) <= radius() * 1.3 or _in_activation_zone(local):
 				_touch_id = t.index
 				active = true
-				_update_from(_to_local(t.position))
+				_grab(local)
 				get_viewport().set_input_as_handled()
 		elif not t.pressed and t.index == _touch_id:
 			_release()
@@ -77,10 +100,11 @@ func _input(event: InputEvent) -> void:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_LEFT:
 			if mb.pressed and _touch_id == -99:
-				if _to_local(mb.position).distance_to(center()) <= radius() * 1.3:
+				var local := _to_local(mb.position)
+				if local.distance_to(center()) <= radius() * 1.3 or _in_activation_zone(local):
 					_touch_id = -2
 					active = true
-					_update_from(_to_local(mb.position))
+					_grab(local)
 			elif not mb.pressed and _touch_id == -2:
 				_release()
 	elif event is InputEventMouseMotion and _touch_id == -2 and active:
@@ -93,7 +117,10 @@ func _update_from(local: Vector2) -> void:
 	if off.length() > maxr:
 		off = off.normalized() * maxr
 	_knob = off
-	var v := off / maxr
+	# screen coords are y-DOWN but the steering value is y-UP (same
+	# convention as WASD / drag-steer), so pushing the stick up really does
+	# drive the snake up-screen
+	var v := Vector2(off.x, -off.y) / maxr
 	value = Vector2.ZERO if v.length() < DEAD else v.limit_length(1.0)
 	vector_changed.emit(value)
 	queue_redraw()
@@ -102,6 +129,7 @@ func _release() -> void:
 	_touch_id = -99
 	active = false
 	value = Vector2.ZERO
+	configure(ui_scale, _safe_left, _safe_bottom)   # ring returns to its resting spot
 	vector_changed.emit(value)
 	queue_redraw()
 
@@ -109,7 +137,7 @@ func _release() -> void:
 ## Simulates a HELD stick so the value does not decay.
 func force_value(v: Vector2) -> void:
 	active = true
-	_knob = v.limit_length(1.0) * (radius() * 0.82)
+	_knob = Vector2(v.x, -v.y).limit_length(1.0) * (radius() * 0.82)
 	value = Vector2.ZERO if v.length() < DEAD else v.limit_length(1.0)
 	vector_changed.emit(value)
 	queue_redraw()
