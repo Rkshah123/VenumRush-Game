@@ -37,7 +37,9 @@ var _preview_yaw := 0.0
 var _arena_label: Label
 var _pause_btn: Button = null
 var _quit_panel: PanelContainer = null
+var _pause_settings := false
 var _safe_tick := -1
+var _opt_selected: Button = null
 var _page := "main"
 var _pause_panel: PanelContainer
 var _over_panel: PanelContainer
@@ -58,6 +60,8 @@ var _tfills: Array = []        # [ProgressBar, role] — fill colors
 var _scrims: Array = []        # [ColorRect, role, alpha]
 var _menu_scrim: TextureRect = null
 var _menu_title: Label = null
+var _menu_logo: TextureRect = null
+var _menu_help: VBoxContainer = null
 var _ui_s := 1.0               # menu scale factor (set on build / resize)
 
 func _ready() -> void:
@@ -79,6 +83,8 @@ func _ready() -> void:
 	show_menu(true)
 	set_gameplay_visible(false)
 	overlay_group.visible = false
+	# sound toggle state
+	AudioServer.set_bus_mute(0, int(SaveMgr.get_value("muted", 0)) == 1)
 	# restore the saved theme across menus, HUD, panels and scrims
 	apply_theme(int(SaveMgr.get_value("theme", UiTheme.CLASSIC)))
 
@@ -208,7 +214,14 @@ func set_paused(paused: bool) -> void:
 		_pause_btn.text = "▶" if paused else "❚❚"
 
 func set_score(v: int) -> void:
+	if score_label.text == str(v):
+		return
 	score_label.text = str(v)
+	# punchy score feedback (spec §7)
+	score_label.pivot_offset = score_label.size * 0.5
+	score_label.scale = Vector2(1.18, 1.18)
+	var tw := score_label.create_tween()
+	tw.tween_property(score_label, "scale", Vector2.ONE, 0.22).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 func set_length(v: float) -> void:
 	length_label.text = "LENGTH %d M" % int(round(v))
@@ -354,6 +367,7 @@ func _build_menu() -> void:
 	logo.custom_minimum_size = Vector2(150 * _ui_s, 150 * _ui_s)
 	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vroot.add_child(logo)
+	_menu_logo = logo
 
 	_menu_title = _mk_label("SERPENTIS 3D", int(46 * _ui_s), "accent", vroot)
 	_menu_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -383,19 +397,27 @@ func _build_menu() -> void:
 	next_b.pressed.connect(func(): AudioMgr.play("click"); arena_shift.emit(1))
 	arow.add_child(next_b)
 	# quick graphics-mode selector right on the title screen (settings also
-	# carries the full 2D / 3D selector)
+	# carries the full 2D / 3D selector). Tapping a mode SELECTS it.
 	var mode_tag := _mk_label("MODE", int(11 * _ui_s), "dim", _menu_main)
 	mode_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	var mrow := HBoxContainer.new()
 	mrow.alignment = BoxContainer.ALIGNMENT_CENTER
 	mrow.add_theme_constant_override("separation", 8)
 	_menu_main.add_child(mrow)
-	_option_button(mrow, "2D TOP-DOWN", "gfx_mode", 0, func(): _set_mode(int(SaveMgr.get_value("gfx_mode", 1))))
-	_option_button(mrow, "3D TPS", "gfx_mode", 1, func(): _set_mode((int(SaveMgr.get_value("gfx_mode", 1)) + 1) % 2))
+	_option_button(mrow, "2D TOP-DOWN", "gfx_mode", 0, func(): _set_mode(0))
+	_option_button(mrow, "3D TPS", "gfx_mode", 1, func(): _set_mode(1))
 	_menu_button(_menu_main, "PLAY", func(): play_pressed.emit(), true)
 	_menu_button(_menu_main, "SNAKES", func(): _menu_page("skins"))
+	_menu_button(_menu_main, "HOW TO PLAY", func(): _menu_page("help"))
 	_menu_button(_menu_main, "SETTINGS", func(): _swap_menu(false))
 	_menu_button(_menu_main, "QUIT", func(): quit_pressed.emit())
+	# quick sound toggle right on the title screen (settings keeps the slider)
+	var srow := HBoxContainer.new()
+	srow.alignment = BoxContainer.ALIGNMENT_CENTER
+	srow.add_theme_constant_override("separation", 8)
+	_menu_main.add_child(srow)
+	_option_button(srow, "SOUND ON", "muted", 0, func(): _set_muted(0))
+	_option_button(srow, "SOUND OFF", "muted", 1, func(): _set_muted(1))
 	var hint := _mk_label("", int(12 * _ui_s), "dim", vroot)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.text = "mouse steers, LMB boosts" if not OS.has_feature("android") else "drag steers, 2nd finger boosts"
@@ -435,19 +457,22 @@ func _build_menu() -> void:
 	trow.add_theme_constant_override("separation", 8)
 	_menu_settings.add_child(trow)
 	for t in UiTheme.NAMES.size():
-		_option_button(trow, str(UiTheme.NAMES[t]), "theme", t, func(): _set_theme(int(SaveMgr.get_value("theme", 0)) ^ 1))
+		var tid := t
+		_option_button(trow, str(UiTheme.NAMES[tid]), "theme", tid, func(): _set_theme(tid))
 
-	# GRAPHICS MODE selector — 2D top-down vs 3D/2.5D
+	# GRAPHICS MODE selector — 2D top-down vs 3D TPS (direct selection)
 	_mk_label("GRAPHICS MODE", int(13 * _ui_s), "dim", _menu_settings)
 	var grow := HBoxContainer.new()
 	grow.add_theme_constant_override("separation", 8)
 	_menu_settings.add_child(grow)
-	_option_button(grow, "2D TOP-DOWN", "gfx_mode", 0, func(): _set_mode(int(SaveMgr.get_value("gfx_mode", 1))))
-	_option_button(grow, "3D  2.5D", "gfx_mode", 1, func(): _set_mode((int(SaveMgr.get_value("gfx_mode", 1)) + 1) % 2))
+	_option_button(grow, "2D TOP-DOWN", "gfx_mode", 0, func(): _set_mode(0))
+	_option_button(grow, "3D TPS", "gfx_mode", 1, func(): _set_mode(1))
 
 	_menu_button(_menu_settings, "BACK", func(): _swap_menu(true))
+	_build_help_menu(vroot)
 	_build_skins_menu(vroot)
 	_menu_skins.visible = false
+	call_deferred("_animate_menu_intro")
 
 func _set_theme(id: int) -> void:
 	SaveMgr.set_value("theme", id)
@@ -456,12 +481,85 @@ func _set_theme(id: int) -> void:
 	theme_changed.emit(id)
 
 func _set_mode(id: int) -> void:
-	SaveMgr.set_value("gfx_mode", id)
-	_refresh_options()
+	# Direct selection (never a toggle). Re-selecting the active mode just
+	# re-affirms the highlight — no pointless world rebuild.
+	if int(SaveMgr.get_value("gfx_mode", 1)) != id:
+		SaveMgr.set_value("gfx_mode", id)
+		AudioMgr.play("click")
+		_refresh_options()
+		mode_changed.emit(id)
+	else:
+		AudioMgr.play("click")
+		_refresh_options()
+
+func _set_muted(on_off: int) -> void:
+	# 0 = sound on, 1 = sound off (title-screen quick toggle)
+	SaveMgr.set_value("muted", on_off)
+	AudioServer.set_bus_mute(0, on_off == 1)
 	AudioMgr.play("click")
-	mode_changed.emit(id)
+	_refresh_options()
+
+# ---------------------------------------------------------------- how to play
+
+func _build_help_menu(vroot: Container) -> void:
+	_menu_help = VBoxContainer.new()
+	_menu_help.add_theme_constant_override("separation", int(8 * _ui_s))
+	_menu_help.custom_minimum_size = Vector2(420 * _ui_s, 0)
+	vroot.add_child(_menu_help)
+	_menu_help.visible = false
+	var h := _mk_label("HOW TO PLAY", int(24 * _ui_s), "accent", _menu_help)
+	h.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var rows := [
+		["GOAL", "Eat fruit to grow. Cut rivals by ramming their body."],
+		["POWER ORBS", "Magnet Pulse vacuums fruit; Shield blocks body hits."],
+		["GROW", "Every fruit adds length. Long snakes score faster."],
+	]
+	if OS.has_feature("android"):
+		rows.append(["CONTROLS", "Drag anywhere to steer. Lift to go straight."])
+		rows.append(["BOOST", "Hold a second finger to sprint."])
+	else:
+		rows.append(["CONTROLS", "Move the mouse to steer - the snake follows it."])
+		rows.append(["BOOST", "Hold Left Mouse or SPACE to sprint."])
+	for r in rows:
+		var line := _mk_label("%s   %s" % [r[0], r[1]], int(13 * _ui_s), "dim", _menu_help)
+		line.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		line.custom_minimum_size = Vector2(400 * _ui_s, 0)
+	_menu_button(_menu_help, "BACK", func(): _menu_page("main"))
+
+# ---------------------------------------------------------------- intro anim
+
+func _animate_menu_intro() -> void:
+	# logo pops in, then the menu items stagger in (spec §5/§9)
+	if _menu_logo != null and is_instance_valid(_menu_logo):
+		_menu_logo.pivot_offset = _menu_logo.custom_minimum_size * 0.5
+		_menu_logo.scale = Vector2(0.62, 0.62)
+		_menu_logo.modulate.a = 0.0
+		var tw := _menu_logo.create_tween()
+		tw.set_parallel(true)
+		tw.tween_property(_menu_logo, "scale", Vector2.ONE, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tw.tween_property(_menu_logo, "modulate:a", 1.0, 0.4)
+	var items: Array = []
+	if _menu_title != null:
+		items.append(_menu_title)
+	if _menu_main != null:
+		items.append(_menu_main)
+	for i in items.size():
+		var c: CanvasItem = items[i]
+		if not is_instance_valid(c):
+			continue
+		c.modulate.a = 0.0
+		var tw2 := c.create_tween()
+		tw2.tween_interval(0.22 + 0.09 * float(i))
+		tw2.tween_property(c, "modulate:a", 1.0, 0.28)
 
 func _swap_menu(show_main: bool) -> void:
+	if _pause_settings:
+		# returning from settings opened mid-match -> back to the PAUSE overlay
+		_pause_settings = false
+		show_menu(false)
+		_menu_page("main")
+		show_pause(true)
+		return
 	_menu_page("main" if show_main else "settings")
 
 func current_page() -> String:
@@ -472,6 +570,8 @@ func _menu_page(page: String) -> void:
 	_menu_main.visible = page == "main"
 	_menu_settings.visible = page == "settings"
 	_menu_skins.visible = page == "skins"
+	if _menu_help != null:
+		_menu_help.visible = page == "help"
 	if _preview_snake != null:
 		_preview_snake.set_physics_process(page == "skins")
 	if _preview_vp != null:
@@ -568,6 +668,11 @@ func _process(delta: float) -> void:
 	if int(Time.get_ticks_msec() / 500) != _safe_tick:
 		_safe_tick = int(Time.get_ticks_msec() / 500)
 		_apply_safe_area()
+	# gentle pulse on the ACTIVE mode/theme button so the current selection is
+	# obvious at a glance (spec §1)
+	if _opt_selected != null and is_instance_valid(_opt_selected) and menu_group != null and menu_group.visible:
+		var pulse := 0.88 + 0.12 * sin(Time.get_ticks_msec() * 0.004)
+		_opt_selected.modulate.a = pulse
 	# slow breathing pulse on the menu title (ambient life on the start screen)
 	if menu_group != null and menu_group.visible and _menu_title != null and is_instance_valid(_menu_title):
 		_menu_title.modulate.a = 0.92 + 0.08 * sin(Time.get_ticks_msec() * 0.0016)
@@ -615,9 +720,17 @@ func _build_pause() -> void:
 	_mk_label("PAUSED", 44, "text", p)
 	_menu_button(p, "RESUME", func(): resume_pressed.emit())
 	_menu_button(p, "RESTART MATCH", func(): restart_pressed.emit())
+	_menu_button(p, "SETTINGS", func(): _open_settings_from_pause())
 	_menu_button(p, "MAIN MENU", func(): tomenu_pressed.emit())
 	var hint := _mk_label("ESC TO RESUME" if not OS.has_feature("android") else "BACK / TAP RESUME", 13, "dim", p)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+
+func _open_settings_from_pause() -> void:
+	# settings opened mid-match: keep the world frozen, remember where to go back
+	_pause_settings = true
+	overlay_group.visible = false
+	show_menu(true)
+	_menu_page("settings")
 
 func _build_pause_button() -> void:
 	# Always-visible play/pause control (spec section 3) - top-right of the HUD
@@ -810,19 +923,36 @@ func _menu_button(parent: Node, text: String, on_press: Callable, primary: bool 
 	if not _tb.has(b):
 		_tb.append(b)
 		b.set_meta("primary", primary)
+	# micro hover / press motion (spec §5/§9)
+	b.pivot_offset = b.custom_minimum_size * 0.5
+	b.mouse_entered.connect(func():
+		var tw := b.create_tween()
+		tw.tween_property(b, "scale", Vector2(1.03, 1.03), 0.10).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
+	b.mouse_exited.connect(func():
+		var tw := b.create_tween()
+		tw.tween_property(b, "scale", Vector2.ONE, 0.12).set_trans(Tween.TRANS_QUAD))
+	b.button_down.connect(func():
+		var tw := b.create_tween()
+		tw.tween_property(b, "scale", Vector2(0.96, 0.96), 0.06))
+	b.button_up.connect(func():
+		var tw := b.create_tween()
+		tw.tween_property(b, "scale", Vector2(1.03, 1.03), 0.10))
 	return b
 
 func _option_button(parent: Node, text: String, group: String, value: int, on_press: Callable) -> Button:
-	# settings selector button; selection state refreshed by _refresh_options
+	# settings/title selector button; tapping ALWAYS selects THIS value (never
+	# a toggle) and the active one is marked with a pulsing check (spec §1)
 	var b := _menu_button(parent, text, on_press)
-	b.custom_minimum_size = Vector2(152 * _ui_s, 38 * _ui_s)
+	b.custom_minimum_size = Vector2(168 * _ui_s, 40 * _ui_s)
 	b.add_theme_font_size_override("font_size", int(15 * _ui_s))
 	b.set_meta("opt_group", group)
 	b.set_meta("opt_value", value)
+	b.set_meta("opt_text", text)
 	_topt.append(b)
 	return b
 
 func _refresh_options() -> void:
+	_opt_selected = null
 	for b: Button in _topt:
 		if not is_instance_valid(b):
 			continue
@@ -831,14 +961,14 @@ func _refresh_options() -> void:
 		var normal := StyleBoxFlat.new()
 		normal.bg_color = accent if sel else UiTheme.with_alpha("btn_bg", 0.94)
 		normal.border_color = accent
-		normal.set_border_width_all(1)
+		normal.set_border_width_all(2 if sel else 1)
 		normal.set_corner_radius_all(8)
 		normal.content_margin_left = 10
 		normal.content_margin_right = 10
 		normal.content_margin_top = 6
 		normal.content_margin_bottom = 6
 		var hover := normal.duplicate() as StyleBoxFlat
-		hover.bg_color = accent.lightened(0.08) if sel else UiTheme.c("btn_hover_bg")
+		hover.bg_color = accent.lightened(0.10) if sel else UiTheme.c("btn_hover_bg")
 		b.add_theme_stylebox_override("normal", normal)
 		b.add_theme_stylebox_override("hover", hover)
 		b.add_theme_stylebox_override("pressed", hover)
@@ -846,6 +976,10 @@ func _refresh_options() -> void:
 		b.add_theme_color_override("font_color", UiTheme.c("panel_bg") if sel else UiTheme.c("text"))
 		b.add_theme_color_override("font_hover_color", UiTheme.c("panel_bg") if sel else UiTheme.c("accent"))
 		b.add_theme_color_override("font_pressed_color", UiTheme.c("panel_bg") if sel else UiTheme.c("accent"))
+		b.text = str(b.get_meta("opt_text")) + ("   ACTIVE" if sel else "")
+		b.scale = Vector2.ONE
+		if sel and _opt_selected == null:
+			_opt_selected = b
 
 func _style_button(b: Control, primary: bool = false) -> void:
 	var accent := UiTheme.c("accent")

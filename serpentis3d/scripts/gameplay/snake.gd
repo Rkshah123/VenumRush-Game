@@ -89,6 +89,7 @@ var _flick_timer := 0.0
 var _flick_phase := 0.0
 var _lunge := 0.0                 # eating animation: quick head snap (0..1)
 var _pulse := 0.0                 # growth response: brief body thickening (0..1)
+var _lean := 0.0                  # roll into turns (body bank)
 var _eye_mats: Array[StandardMaterial3D] = []   # eyes — theme rim pass
 var head_vel := Vector3(0, 0, 1)     # world velocity of head (for AI prediction)
 
@@ -191,7 +192,10 @@ func _physics_process(delta: float) -> void:
 	var max_rate := speed_target / MIN_TURN_RADIUS
 	var rate := clampf(TURN_RATE_BASE * (0.8 if boost_active else 1.0), 0.5, max_rate)
 	var dh := wrapf(target_h - heading, -PI, PI)
-	heading += clampf(dh, -rate * delta, rate * delta)
+	var turn_step := clampf(dh, -rate * delta, rate * delta)
+	heading += turn_step
+	# body roll into turns: snakes bank into corners (spec §3)
+	_lean = lerpf(_lean, clampf(-turn_step / maxf(delta, 0.001) * 0.06, -0.5, 0.5), 1.0 - exp(-8.0 * delta))
 
 	# --- accelerate & move ---
 	speed_cur = move_toward(speed_cur, speed_target, (14.0 if boost_active else 7.0) * delta)
@@ -289,6 +293,9 @@ func _update_spine(delta: float) -> void:
 
 	# Root carries the mesh: anchor the local tube at the head position.
 	global_position = head_pos
+	# bank the body into turns (roll around the spine axis) for natural motion
+	if body_mi != null:
+		body_mi.rotation.z = _lean * 0.30
 
 	# upload to GPU — stations map along WIDTH (x), sampled as vec2(t, 0.5)
 	var bytes := _spine.to_byte_array()
@@ -684,7 +691,9 @@ func _update_head(delta: float) -> void:
 	# Smooth ROTATION only (scale kept separate — Basis.slerp needs pure rotation).
 	_head_rot = _head_rot.slerp(target_basis, clampf(13.0 * delta, 0.0, 1.0))
 	var s: float = (body_r / 0.56) * 0.82
-	var b := _head_rot.scaled(Vector3(s, s, s))
+	# bank the head into turns (roll around its own forward axis)
+	var hb := _head_rot.rotated(Vector3(0, 0, -1), _lean * 0.35)
+	var b := hb.scaled(Vector3(s, s, s))
 	# eat animation: quick forward lunge + jaw snap while the fruit flies in
 	_lunge = maxf(0.0, _lunge - delta * 3.3)
 	var lunge_q := 1.0 - _lunge

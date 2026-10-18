@@ -11,7 +11,8 @@ var state := State.MENU
 var _arena_key := "valley"
 var _cam_angle := 0.0
 var _cam_pos := Vector3(0, 18, 38)
-var _gfx_mode := 1               # 0 = 2D top-down, 1 = 3D / 2.5D (settings)
+var _gfx_mode := 1               # 0 = 2D top-down, 1 = 3D TPS (settings)
+var _cam_2d_h := 27.0            # smoothed 2D camera height (zoom easing)
 var _theme_id := 0               # UiTheme.CLASSIC / DARK (settings)
 var _topdown_dist := 0.0        # fixed camera distance fitting the whole arena
 var _topdown_dirty := true
@@ -26,6 +27,7 @@ var _shot_skins := false
 var _shot_settings := false
 var _theme_test := false
 var _uix_test := false
+var _mode_test := false
 var _shot_game := false
 var _quit_at := -1.0
 var _no_death_dev := false
@@ -94,6 +96,9 @@ func _ready() -> void:
 		if a == "--uix-test":
 			_autoplay = true
 			_uix_test = true
+		if a == "--mode-test":
+			_autoplay = true
+			_mode_test = true
 	_arena_key = str(SaveMgr.get_value("arena", "valley"))
 	if arena_dev != "" and ArenaPresets.ALL.has(arena_dev):
 		_arena_key = arena_dev
@@ -153,7 +158,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test", "--uix-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test", "--uix-test", "--mode-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -235,6 +240,9 @@ func _dev_sequence() -> void:
 	print("DEV: play started")
 	if _uix_test:
 		await _uix_test_run()
+		return
+	if _mode_test:
+		await _mode_test_run()
 		return
 	if _touch_test:
 		await _touch_test_run()
@@ -350,6 +358,43 @@ func _skins_test_run() -> void:
 	SaveMgr.set_value("skin", before)
 	SaveMgr.save()
 	print("SKINTEST restored now=%d" % int(SaveMgr.get_value("skin", 0)))
+	_quit_nicely()
+
+# ---------------------------------------------------------------- mode QA
+
+func _mode_test_run() -> void:
+	# Drives the REAL selector buttons (spec §1): press 2D, verify the game is
+	# in 2D mode, the world camera is top-down, the save matches and the button
+	# shows ACTIVE; then the same for 3D TPS.
+	await get_tree().create_timer(1.2).timeout
+	_start_play()
+	match_world.no_death = true
+	await get_tree().create_timer(1.5).timeout
+	for want in [0, 1]:
+		var btn: Button = null
+		for b in hud._topt:
+			if str(b.get_meta("opt_group")) == "gfx_mode" and int(b.get_meta("opt_value")) == want:
+				btn = b
+				break
+		if btn == null:
+			print("MODETEST FAIL no button for ", want)
+			_quit_nicely()
+			return
+		btn.emit_signal("pressed")
+		for i in 40:
+			await get_tree().physics_frame
+		var is_2d := _gfx_mode == 0
+		var cam_ok := false
+		if want == 0:
+			cam_ok = cam.global_position.y > 15.0 and absf(cam.global_transform.basis.z.y - 1.0) < 0.01
+		else:
+			cam_ok = cam.global_position.y < 12.0 and cam.global_transform.basis.z.y < 0.6
+		var saved_ok: bool = int(SaveMgr.get_value("gfx_mode", -1)) == want
+		var active_ok := str(btn.text).contains("ACTIVE")
+		print("MODETEST want=%d mode=%d cam_topdown_ok=%s saved=%s active_mark=%s %s" % [
+			want, _gfx_mode, str(cam_ok), str(saved_ok), str(active_ok),
+			"PASS" if (is_2d == (want == 0) and cam_ok and saved_ok and active_ok) else "FAIL"])
+	await _snap("shot_mode_%d.png" % _gfx_mode)
 	_quit_nicely()
 
 # ---------------------------------------------------------------- UI QA
@@ -648,7 +693,11 @@ func _input(event: InputEvent) -> void:
 				_pause()
 			State.PAUSED:
 				get_viewport().set_input_as_handled()
-				_resume()
+				# BACK inside settings-from-pause returns to the pause overlay
+				if hud.current_page() != "main":
+					hud._swap_menu(true)
+				else:
+					_resume()
 			State.OVER:
 				_to_menu()
 			_:
@@ -721,8 +770,9 @@ func _topdown_camera(delta: float) -> void:
 func _camera_2d_topdown(delta: float) -> void:
 	# TRUE top-down: the camera sits straight above the player, world north
 	# fixed up-screen, and follows the head with gentle smoothing. No tilt, no
-	# horizon — a modern overhead arena view. Height adapts to aspect so a
-	# narrow (portrait) screen still shows enough arena width.
+	# horizon — a modern overhead arena view. Height is tuned close to the
+	# snake (spec §2) so the snake reads big while a healthy ring of arena
+	# stays visible; boosting eases the camera out a touch for reaction room.
 	var p := match_world.player
 	if p == null or not is_instance_valid(p):
 		return
@@ -732,16 +782,22 @@ func _camera_2d_topdown(delta: float) -> void:
 	var aspect := 1.6
 	if vp != null and vp.get_visible_rect().size.y > 0.0:
 		aspect = vp.get_visible_rect().size.x / vp.get_visible_rect().size.y
-	var h := 48.0 * clampf(1.55 / maxf(aspect, 0.6), 1.0, 1.7)
+	# close follow distance: ~26 m tall view, wider on portrait screens
+	var h := 27.0 * clampf(1.5 / maxf(aspect, 0.6), 1.0, 1.55)
+	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * maxf(Snake.BOOST_MULT - 1.0, 0.1)), 0.0, 1.0)
+	var length_k := clampf((p.length - 8.0) / 42.0, 0.0, 1.0)
+	h *= 1.0 + 0.10 * boost_k + 0.06 * length_k
+	h = lerpf(h, _cam_2d_h, 1.0 - exp(-2.5 * delta))
+	_cam_2d_h = h
 	# follow the head with a touch of look-ahead, clamped so we never drift
 	# far past the arena wall
 	var fwd := Vector3(sin(p.heading), 0.0, cos(p.heading))
-	var want := p.head_pos + fwd * 4.0
+	var want := p.head_pos + fwd * 3.0
 	var R: float = match_world.arena_radius + 2.0
 	want.x = clampf(want.x, -R, R)
 	want.z = clampf(want.z, -R, R)
-	_cam_pos = _cam_pos.lerp(Vector3(want.x, h, want.z), 1.0 - exp(-7.0 * delta))
-	_cam_look = _cam_look.lerp(want, 1.0 - exp(-7.0 * delta))
+	_cam_pos = _cam_pos.lerp(Vector3(want.x, h, want.z), 1.0 - exp(-6.0 * delta))
+	_cam_look = _cam_look.lerp(want, 1.0 - exp(-6.0 * delta))
 	# straight-down orientation (fixed world basis; -Z is up-screen)
 	var b := Basis(Vector3(1, 0, 0), Vector3(0, 0, -1), Vector3(0, 1, 0))
 	cam.global_transform = Transform3D(b, Vector3(_cam_pos.x, h, _cam_pos.z))
@@ -757,16 +813,16 @@ func _camera_3d_tps(delta: float) -> void:
 	_player_last_head = head
 	var fwd := Vector3(sin(p.heading), 0.0, cos(p.heading))
 	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * (Snake.BOOST_MULT - 1.0)), 0.0, 1.0)
-	var len_extra := clampf(p.length * 0.045, 0.0, 2.6)
-	var dist := 9.0 + len_extra + (1.4 if p.boost_active else 0.0)
-	var height := 4.6 + len_extra * 0.7
+	var len_extra := clampf(p.length * 0.042, 0.0, 2.4)
+	var dist := 7.6 + len_extra + (1.2 if p.boost_active else 0.0)
+	var height := 3.9 + len_extra * 0.65
 	var desired := head - fwd * dist + Vector3.UP * height
 	_cam_pos = _cam_pos.lerp(desired, 1.0 - exp(-5.5 * delta))
-	var look_target := head + fwd * (4.6 + boost_k * 2.6) + Vector3.UP * 1.1
+	var look_target := head + fwd * (4.2 + boost_k * 2.4) + Vector3.UP * 1.0
 	_cam_look = _cam_look.lerp(look_target, 1.0 - exp(-7.0 * delta))
 	cam.global_position = _cam_pos
 	cam.look_at(_cam_look, Vector3.UP)
-	cam.fov = lerpf(cam.fov, 62.0 + boost_k * 8.0, 1.0 - exp(-6.0 * delta))
+	cam.fov = lerpf(cam.fov, 60.0 + boost_k * 8.0, 1.0 - exp(-6.0 * delta))
 
 func _topdown_fit() -> void:
 	# 2D board height for the current aspect — the follow camera needs no

@@ -142,8 +142,9 @@ void fragment() {
 	NORMAL = N;
 
 	ALBEDO = col;
-	ROUGHNESS = clamp(0.30 + 0.30 * (1.0 - sv) + 0.14 * belly_f + 0.10 * pat_m, 0.2, 0.85);
-	SPECULAR = 0.48;
+	// wetter, glossier skin so scales catch the sun like the reference snakes
+	ROUGHNESS = clamp(0.26 + 0.28 * (1.0 - sv) + 0.14 * belly_f + 0.10 * pat_m, 0.16, 0.80);
+	SPECULAR = 0.58;
 	// Theme visibility pass: fresnel edge light in the snake's accent color so
 	// bodies never merge into dark arenas / 2D backgrounds.
 	float fres = pow(1.0 - abs(dot(normalize(N), normalize(VIEW))), 3.0);

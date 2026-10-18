@@ -43,10 +43,16 @@ float fbm(vec2 p) {
 
 void fragment() {
 	// vertex colors carry the whole biome pass; fragment adds cheap detail only
+	// Multi-octave detail so the court still reads as ground when the 2D
+	// camera sits close to the snake (spec §6)
 	float mottle = vnoise(v_world_pos.xz * 1.35);
+	float fine = vnoise(v_world_pos.xz * 4.4);
+	float patch = fbm(v_world_pos.xz * 0.11);
 	vec3 col = v_col;
-	col *= 0.90 + 0.20 * mottle;
-	col *= 1.0 + (hash2(floor(v_world_pos.xz * 3.0)) - 0.5) * 0.05;
+	col *= 0.86 + 0.24 * mottle + 0.10 * fine;
+	col *= 0.94 + 0.12 * patch;
+	col *= 1.0 + (hash2(floor(v_world_pos.xz * 3.0)) - 0.5) * 0.06;
+	col *= 1.0 + (hash2(floor(v_world_pos.xz * 9.0)) - 0.5) * 0.045;
 
 	// Stadium-style diagonal mow bands inside the playable circle — readable
 	// from the fixed top-down camera, soft-edged so they never shimmer.

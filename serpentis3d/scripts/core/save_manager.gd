@@ -18,6 +18,7 @@ const DEFAULTS := {
 	"skin": 0,
 	"theme": 0,
 	"gfx_mode": 1,   # 0 = 2D top-down, 1 = 3D/2.5D (default keeps the 3D look)
+	"muted": 0,      # 0 = sound on, 1 = muted
 }
 
 var data: Dictionary = {}

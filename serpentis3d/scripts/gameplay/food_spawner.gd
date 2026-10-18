@@ -32,21 +32,25 @@ const SURFACE_COLORS := {
 	"rind_lime": Color(0.60, 0.77, 0.35),
 	"seed_dark": Color(0.03, 0.03, 0.03),
 	"fruit_inner": Color(0.95, 0.87, 0.55),
+	"spore_light": Color(0.92, 0.90, 0.84),
 }
 const VAR_TABLE := [
 	[
-		{"path": "res://models/food/apple.obj", "cap": 90, "w": 0.42, "h": 0.72, "emit": 0.45},
-		{"path": "res://models/food/strawberry.obj", "cap": 45, "w": 0.29, "h": 0.60, "emit": 0.50},
-		{"path": "res://models/food/watermelon_slice.obj", "cap": 45, "w": 0.29, "h": 0.66, "emit": 0.35,
+		{"path": "res://models/food/apple.obj", "cap": 90, "w": 0.40, "h": 0.72, "emit": 0.45},
+		{"path": "res://models/food/strawberry.obj", "cap": 45, "w": 0.28, "h": 0.60, "emit": 0.50},
+		{"path": "res://models/food/watermelon_slice.obj", "cap": 45, "w": 0.32, "h": 0.66, "emit": 0.35,
 			"surface_map": {"rind": "rind_green", "rindw": "rind_lime", "black": "seed_dark"}},
 	],
 	[
-		{"path": "res://models/food/cherries.obj", "cap": 30, "w": 1.0, "h": 0.60, "emit": 0.55},
+		{"path": "res://models/food/cherries.obj", "cap": 20, "w": 0.58, "h": 0.60, "emit": 0.55},
+		{"path": "res://models/food/mushroom.obj", "cap": 14, "w": 0.42, "h": 0.58, "emit": 0.55,
+			"surface_map": {"white": "spore_light"}},
 	],
 	[
-		{"path": "res://models/food/lemon.obj", "cap": 12, "w": 0.55, "h": 0.70, "emit": 0.60},
-		{"path": "res://models/food/banana.obj", "cap": 9, "w": 0.45, "h": 0.64, "emit": 0.60,
+		{"path": "res://models/food/lemon.obj", "cap": 10, "w": 0.36, "h": 0.70, "emit": 0.60},
+		{"path": "res://models/food/banana.obj", "cap": 8, "w": 0.32, "h": 0.64, "emit": 0.60,
 			"surface_map": {"banana2": "seed_dark", "seed": "fruit_inner"}},
+		{"path": "res://models/food/carrot.obj", "cap": 7, "w": 0.32, "h": 0.78, "emit": 0.60},
 	],
 	[
 		{"path": "", "cap": 8, "w": 1.0, "h": 0.6, "emit": 1.0, "power": true},
@@ -217,8 +221,11 @@ func _spawn_orb(kind: int, at: Vector3 = Vector3.INF) -> void:
 			if _clear_of_obstacles(pos, r):
 				break
 	var idx: int = free.pop_back()
-	(s["alive"] as Dictionary)[idx] = {"pos": pos, "phase": randf() * TAU, "kind": kind}
+	(s["alive"] as Dictionary)[idx] = {"pos": pos, "phase": randf() * TAU, "kind": kind, "born": t_now()}
 	_total += 1
+
+func t_now() -> float:
+	return Time.get_ticks_msec() * 0.001
 
 func _clear_of_obstacles(pos: Vector3, r: float) -> bool:
 	for ob in obstacles:
@@ -350,7 +357,15 @@ func _process(delta: float) -> void:
 				var p: Vector3 = rec["pos"]
 				var yaw := sin(t * 0.7 + ph) * 0.28 + (t * 2.2 if kind == 3 else 0.0)
 				var yy: float = BOB_BASE[kind] + sin(t * BOB_SPD[kind] + ph) * BOB_AMP[kind]
-				var basis := Basis(Vector3.UP, yaw)
+				# spawn pop-in: elastic scale-up over the first 0.3 s (spec §4)
+				var sc := 1.0
+				var age: float = t - float(rec.get("born", t))
+				if age < 0.3:
+					var k := age / 0.3
+					sc = 1.0 + 0.45 * sin(k * PI) * (1.0 - k) - 0.45 * k * (1.0 - k)
+					sc = maxf(sc, 0.05)
+					yy -= 0.5 * (1.0 - k)
+				var basis := Basis(Vector3.UP, yaw).scaled(Vector3(sc, sc, sc))
 				mm.set_instance_transform(idx, Transform3D(basis, p + Vector3(0.0, yy, 0.0)))
 	# trickle respawn (top: 1 per frame) — also respects the global budget
 	for kind in KIND_TARGETS.size():
@@ -393,10 +408,42 @@ func _real_fruit_mesh(path: String, height: float, emit: float, surface_map: Dic
 		else:
 			st.set_material(_fruit_base_mat(KIND_COLORS[kind].lightened(0.08), emit_b, 0.34))
 		st.commit(am)
+	# rare / golden fruit sit in a soft additive glow halo so they read as
+	# special pickups from the top-down camera (spec §4)
+	if kind >= 1:
+		var sh := SurfaceTool.new()
+		var halo := _halo_surface(KIND_COLORS[kind])
+		sh.append_from(halo, 0, Transform3D(Basis(), Vector3(0.0, 0.02, 0.0)))
+		sh.set_material(halo.material)
+		sh.commit(am)
 	var sbl := SurfaceTool.new()
 	_blob_surface(sbl)
 	sbl.commit(am)
 	return am
+
+func _halo_surface(tint: Color) -> QuadMesh:
+	var q := QuadMesh.new()
+	q.size = Vector2(1.7, 1.7)
+	q.orientation = PlaneMesh.FACE_Y
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 0.4, 1.0])
+	g.colors = PackedColorArray([Color(tint.r, tint.g, tint.b, 0.5), Color(tint.r, tint.g, tint.b, 0.22), Color(tint.r, tint.g, tint.b, 0.0)])
+	var tex := GradientTexture2D.new()
+	tex.gradient = g
+	tex.width = 64
+	tex.height = 64
+	tex.fill = GradientTexture2D.FILL_RADIAL
+	tex.fill_from = Vector2(0.5, 0.5)
+	tex.fill_to = Vector2(1.0, 0.5)
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	m.albedo_texture = tex
+	m.albedo_color = tint
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	q.material = m
+	return q
 
 func _mapped_mat(name_key: String) -> StandardMaterial3D:
 	var col: Color = SURFACE_COLORS.get(name_key, Color(0.8, 0.8, 0.8))
