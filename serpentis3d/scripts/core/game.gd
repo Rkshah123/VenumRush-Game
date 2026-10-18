@@ -111,6 +111,8 @@ func _ready() -> void:
 	hud.arena_shift.connect(_on_arena_shift)
 	hud.theme_changed.connect(_on_theme_changed)
 	hud.mode_changed.connect(_on_mode_changed)
+	if _autoplay:
+		print("DEV: boot theme=%d mode=%d" % [UiTheme.current_id, _gfx_mode])
 
 	cam = Camera3D.new()
 	cam.fov = 55.0
@@ -145,7 +147,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test", "--mode=2d", "--mode=3d"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -582,8 +584,12 @@ func _input(event: InputEvent) -> void:
 				_:
 					pass
 	elif event.is_action_pressed("ui_cancel") or (event is InputEventKey and event.pressed and (event as InputEventKey).keycode == KEY_BACK):
-		# Android BACK: pause in a match, in pause menu or game over = menu,
-		# in settings = main menu, on main menu = allow quit via system default
+		# Android BACK: sub-page (skins/settings) = back to main menu, pause in a
+		# match, resume in pause menu or game over = menu, on main menu = quit.
+		if state == State.MENU and hud.current_page() != "main":
+			get_viewport().set_input_as_handled()
+			hud._menu_page("main")
+			return
 		match state:
 			State.PLAYING:
 				get_viewport().set_input_as_handled()

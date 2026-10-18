@@ -1,5 +1,8 @@
 extends Node
-## SaveMgr — persistent local settings & progress (versioned JSON, safe defaults).
+## SaveMgr: persistent local settings and progress (versioned JSON, safe defaults).
+## JSON numbers come back as float, so int/float keys are coerced on load --
+## without that, the type guard below silently resets every numeric setting
+## (theme, gfx_mode, best_score, ...) to its default on each restart.
 
 const SAVE_PATH := "user://save.json"
 const SAVE_VERSION := 1
@@ -33,7 +36,14 @@ func _load() -> void:
 		var parsed = JSON.parse_string(txt)
 		if typeof(parsed) == TYPE_DICTIONARY:
 			for k: String in parsed.keys():
-				data[k] = parsed[k]
+				var pv: Variant = parsed[k]
+				if DEFAULTS.has(k):
+					var dt := typeof(DEFAULTS[k])
+					if dt == TYPE_INT and typeof(pv) == TYPE_FLOAT:
+						pv = int(pv)
+					elif dt == TYPE_FLOAT and typeof(pv) == TYPE_INT:
+						pv = float(pv)
+				data[k] = pv
 	# Reassert defaults for missing keys, drop unknown types defensively.
 	for k: String in DEFAULTS.keys():
 		if not data.has(k) or typeof(data[k]) != typeof(DEFAULTS[k]):

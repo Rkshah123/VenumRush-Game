@@ -461,10 +461,10 @@ func _build_rim_stones() -> void:
 func _water_material() -> ShaderMaterial:
 	var m := ShaderMaterial.new()
 	m.shader = WATER_SHADER
-	m.set_shader_parameter("u_shallow", _p["water_color"])
-	m.set_shader_parameter("u_deep", _p["water_depth_color"])
+	m.set_shader_parameter("u_shallow", _dk(Color(_p["water_color"]), 0.42))
+	m.set_shader_parameter("u_deep", _dk(Color(_p["water_depth_color"]), 0.42))
 	m.set_shader_parameter("u_alpha", 0.88)
-	var tint := Color(_p["sky_hz"])
+	var tint := _dk(Color(_p["sky_hz"]), 0.5) if _dark else Color(_p["sky_hz"])
 	m.set_shader_parameter("u_sky_tint", Vector3(tint.r, tint.g, tint.b))
 	return m
 

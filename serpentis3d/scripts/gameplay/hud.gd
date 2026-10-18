@@ -35,6 +35,7 @@ var _preview_vp: SubViewport = null
 var _preview_cam: Camera3D = null
 var _preview_yaw := 0.0
 var _arena_label: Label
+var _page := "main"
 var _pause_panel: PanelContainer
 var _over_panel: PanelContainer
 var _over_title: Label
@@ -428,13 +429,18 @@ func _set_theme(id: int) -> void:
 
 func _set_mode(id: int) -> void:
 	SaveMgr.set_value("gfx_mode", id)
+	_refresh_options()
 	AudioMgr.play("click")
 	mode_changed.emit(id)
 
 func _swap_menu(show_main: bool) -> void:
 	_menu_page("main" if show_main else "settings")
 
+func current_page() -> String:
+	return _page
+
 func _menu_page(page: String) -> void:
+	_page = page
 	_menu_main.visible = page == "main"
 	_menu_settings.visible = page == "settings"
 	_menu_skins.visible = page == "skins"
@@ -499,10 +505,11 @@ func _build_skins_menu(vroot: Container) -> void:
 	_menu_skins.add_child(grid)
 	for i in SkinCatalog.count():
 		var b := _menu_button(grid, "", func(): _pick_skin(i))
-		b.custom_minimum_size = Vector2(225, 38)
-		b.add_theme_font_size_override("font_size", 15)
+		b.custom_minimum_size = Vector2(225 * _ui_s, 38 * _ui_s)
+		b.add_theme_font_size_override("font_size", int(15 * _ui_s))
 		_skin_buttons.append(b)
 	_refresh_skin_buttons()
+	_menu_button(_menu_skins, "BACK", func(): _swap_menu(true))
 
 func _refresh_skin_buttons() -> void:
 	var best := int(SaveMgr.get_value("best_score", 0))
