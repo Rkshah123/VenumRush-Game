@@ -8,6 +8,8 @@ render_mode cull_back, diffuse_burley, specular_schlick_ggx;
 varying vec3 v_world_pos;
 varying vec3 v_col;
 
+uniform float u_court_r = 56.0;   // playable circle radius — diagonal turf bands live inside it
+
 void vertex() {
 	v_col = COLOR.rgb;
 	v_world_pos = VERTEX;
@@ -46,7 +48,18 @@ void fragment() {
 	col *= 0.90 + 0.20 * mottle;
 	col *= 1.0 + (hash2(floor(v_world_pos.xz * 3.0)) - 0.5) * 0.05;
 
-	ALBEDO = clamp(col, vec3(0.02), vec3(0.95));
+	// Stadium-style diagonal mow bands inside the playable circle — readable
+	// from the fixed top-down camera, soft-edged so they never shimmer.
+	float d_court = length(v_world_pos.xz);
+	float band = 0.5 + 0.5 * cos((v_world_pos.x + v_world_pos.z) * 0.42);
+	float band_w = smoothstep(0.18, 0.35, band) * (1.0 - smoothstep(0.65, 0.82, band));
+	float court_f = (1.0 - smoothstep(u_court_r * 0.94, u_court_r + 2.0, d_court))
+		* smoothstep(2.0, 6.0, d_court);
+	col *= 1.0 + (band_w - 0.5) * 0.17 * court_f;
+	col += band_w * court_f * 0.03;
+	col = clamp(col, vec3(0.02), vec3(0.95));
+
+	ALBEDO = col;
 	ROUGHNESS = 0.86;
 	SPECULAR = 0.18;
 }

@@ -113,6 +113,7 @@ func _spawn_boss() -> void:
 	var s := AISnake.new()
 	s.configure("hunter", self)
 	s.is_boss = true
+	s.pattern = 1   # broad dark saddle bands — reads as "elite apex" from above
 	s.max_length = 90.0
 	s.display_name = "BOSS SERPENT"
 	_attach(s, false, BOSS_LENGTH)
@@ -403,7 +404,7 @@ func _eat_checks() -> void:
 			var k := int(h["kind"])
 			if k == 3:
 				# POWER ORB: activates a random ability on the eater
-				food.remove_orb_at_pos(k, h["pos"])
+				food.fly_orb_at_pos(k, h["pos"], s)
 				var ab := "magnet" if randf() < 0.5 else "shield"
 				s.apply_ability(ab)
 				if verbose:
@@ -412,16 +413,19 @@ func _eat_checks() -> void:
 					AudioMgr.play("eat_gold")
 					match_event.emit("eat", "MAGNET PULSE" if ab == "magnet" else "SHIELD")
 					if hud != null and is_instance_valid(hud):
-						hud.push_score_popup("MAGNET PULSE" if ab == "magnet" else "SHIELD UP", GameHud.COL_WARN)
+						hud.push_score_popup_at("MAGNET PULSE" if ab == "magnet" else "SHIELD UP", GameHud.COL_WARN, h["pos"])
+				s.eat_bite()
 				continue
 			if s.is_player:
 				AudioMgr.play("eat" if k == 0 else ("eat_rare" if k == 1 else "eat_gold"))
 				var sv := int(FoodSpawner.KIND_SCORE[k])
 				match_event.emit("eat", "+%d" % sv)
 				if hud != null and is_instance_valid(hud):
-					hud.push_score_popup("+%d" % sv, GameHud.COL_GOLD if k == 2 else GameHud.COL_ACCENT)
+					hud.push_score_popup_at("+%d" % sv, GameHud.COL_GOLD if k == 2 else GameHud.COL_ACCENT, h["pos"])
 			s.eat(k, FoodSpawner.KIND_GROWTH[k], FoodSpawner.KIND_SCORE[k])
-			food.remove_orb_at_pos(k, h["pos"])
+			# fruit flies into the mouth; bite + burst are part of the event
+			food.fly_orb_at_pos(k, h["pos"], s)
+			s.eat_bite()
 
 # ------------------------------------------------------------------ HUD feed
 

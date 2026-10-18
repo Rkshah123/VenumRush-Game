@@ -6,6 +6,9 @@ extends Snake
 
 enum Mode { WANDER, SEEK, CHASE, FLEE }
 
+# body pattern mode per personality (see snake_body.gdshader u_pattern)
+const PERSONALITY_PATTERN := {"hunter": 3, "scav": 1, "survivor": 2, "speedy": 4, "territor": 1, "elite": 0, "python": 2, "viper": 3, "mamba": 4, "sidewinder": 1}
+
 const PERSONALITIES := {
 	"hunter":   {"n": "Hunter",    "aggr": 0.95, "caution": 0.25, "range": 22.0, "boost_use": 0.6, "colors": [Color(0.72, 0.12, 0.1), Color(1.0, 0.45, 0.1)]},
 	"scav":     {"n": "Scavenger","aggr": 0.25, "caution": 0.55, "range": 26.0, "boost_use": 0.25, "colors": [Color(0.16, 0.45, 0.7), Color(0.3, 0.9, 1.0)]},
@@ -46,6 +49,7 @@ func configure(personality: String, world) -> void:
 	display_name = str(p["n"])
 	dorsal = Color(p["colors"][0])
 	accent = Color(p["colors"][1])
+	pattern = int(PERSONALITY_PATTERN.get(personality, 0))
 	aggression = float(p["aggr"])
 	caution = float(p["caution"])
 	detect_range = float(p["range"])

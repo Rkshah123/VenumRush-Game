@@ -199,11 +199,13 @@ func _court_color(x: float, z: float) -> Color:
 	var g_b := Color(_p["grass_b"])
 	var d := sqrt(x * x + z * z)
 	var t := clampf(d / _arena_r, 0.0, 1.0)
-	# fg cells must be LARGER than vertex spacing (~3 m) or per-vertex colors
-	# read as a checkered quilt; fine detail lives in the fragment mottle
+	# fg cells must be LARGER than vertex spacing (~2 m) or per-vertex colors
+	# read as a checkered quilt; fine detail lives in the fragment mottle.
+	# Diagonal mow bands (stadium turf) read as a designed modern arena.
+	var band := 0.5 + 0.5 * cos((x + z) * 0.42)
 	var col := g_a.lerp(g_b * 1.04, _fbm2(x, z, 3, 11.0))
-	var arc := 0.5 + 0.5 * sin(d * 0.55)
-	col = col.lerp(g_a.darkened(0.14), 0.20 * arc)
+	col = col.lerp(g_b.lightened(0.09), 0.22 * band)
+	col = col.lerp(col.darkened(0.09), 0.26 * (1.0 - band))
 	var wear := clampf(_fbm2(x + 91.0, z - 53.0, 3, 13.0) * 1.5 - 0.75, 0.0, 1.0)
 	col = col.lerp(Color(_p["dirt"]), wear * 0.40)
 	col = col.lerp(col.darkened(0.38), smoothstep(0.84, 1.0, t) * 0.55)
@@ -278,6 +280,7 @@ func _radial_mesh(r0: float, r1: float, segs: int, rings: int, flat: bool) -> Ar
 func _terrain_material() -> ShaderMaterial:
 	var m := ShaderMaterial.new()
 	m.shader = TERRAIN_SHADER
+	m.set_shader_parameter("u_court_r", _arena_r)
 	return m
 
 # ---------------------------------------------------------------- sky & sun

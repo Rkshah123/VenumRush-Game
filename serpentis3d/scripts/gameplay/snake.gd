@@ -13,10 +13,10 @@ const RING_TEXEL := 1.0 / float(RING_COUNT)
 const HIST_MAX := 1024
 const MIN_LENGTH := 3.5
 const GROWTH_RATE := 3.4        # visual growth speed (m/s toward target length)
-const TURN_RATE_BASE := 3.3
-const MIN_TURN_RADIUS := 0.85   # curvature guard: no tube self-intersection
-const BASE_SPEED := 6.1
-const BOOST_MULT := 1.85
+const TURN_RATE_BASE := 3.6
+const MIN_TURN_RADIUS := 1.05   # curvature guard: no tube self-intersection
+const BASE_SPEED := 4.6
+const BOOST_MULT := 1.6
 const BOOST_MAX := 3.2
 const BOOST_REGEN := 0.55
 
@@ -28,6 +28,7 @@ var dorsal := Color(0.06, 0.52, 0.44)
 var accent := Color(0.95, 0.24, 0.6)
 var belly := Color(0.86, 0.78, 0.58)
 var skin_seed := 0.5
+var pattern := 0                  # 0 plain, 1 bands, 2 blotches, 3 zigzag, 4 stripes
 var initial_length := 7.0
 var max_length := 58.0
 
@@ -85,6 +86,8 @@ var _tongue: Node3D
 var _mouth_open := 0.0
 var _flick_timer := 0.0
 var _flick_phase := 0.0
+var _lunge := 0.0                 # eating animation: quick head snap (0..1)
+var _pulse := 0.0                 # growth response: brief body thickening (0..1)
 var head_vel := Vector3(0, 0, 1)     # world velocity of head (for AI prediction)
 
 # polyline ring buffer
@@ -94,6 +97,8 @@ var _hist_count := 0
 var _last_sample := Vector3(1e9, 1e9, 1e9)
 
 static var _shader: Shader = null
+static var _scale_albedo: Texture2D = null      # shared procedural scale texture
+static var _scale_normal: Texture2D = null      # matching relief normal map
 
 func _ready() -> void:
 	if not is_inside_tree():
@@ -178,7 +183,7 @@ func _physics_process(delta: float) -> void:
 
 	# --- steering: limited angular rate keeps the tube self-consistent ---
 	var target_h := atan2(desired_dir.x, desired_dir.z)
-	var speed_target := BASE_SPEED * (1.0 + clampf((length - 8.0) / 50.0, 0.0, 0.22))
+	var speed_target := BASE_SPEED * (1.0 + clampf((length - 8.0) / 50.0, 0.0, 0.12))
 	if boost_active:
 		speed_target *= BOOST_MULT
 	var max_rate := speed_target / MIN_TURN_RADIUS
@@ -187,7 +192,7 @@ func _physics_process(delta: float) -> void:
 	heading += clampf(dh, -rate * delta, rate * delta)
 
 	# --- accelerate & move ---
-	speed_cur = move_toward(speed_cur, speed_target, (18.0 if boost_active else 9.0) * delta)
+	speed_cur = move_toward(speed_cur, speed_target, (14.0 if boost_active else 7.0) * delta)
 	var fwd := Vector3(sin(heading), 0.0, cos(heading))
 	head_vel = fwd * speed_cur
 	head_pos += head_vel * delta
@@ -227,10 +232,11 @@ func ability_frac() -> float:
 
 # ------------------------------------------------------------------ body sim
 
-func _update_spine(_delta: float) -> void:
+func _update_spine(delta: float) -> void:
+	# decay the growth-response pulse (drives the body-radius bump in _radius_at)
+	_pulse = maxf(0.0, _pulse - delta * 2.1)
 	var ds := length / float(RING_COUNT - 1)
 	var head := _hist_at(0)
-
 	# Walk the recorded polyline from the head backwards, spacing stations by ds.
 	var idx_seg := 0
 	var seg_a := head
@@ -315,15 +321,18 @@ func _hist_at(steps_back: int) -> Vector3:
 	return _hist[(_hist_write - 1 - steps_back + 2 * HIST_MAX) % HIST_MAX]
 
 func _body_radius() -> float:
-	var r := clampf(0.40 + length * 0.0016, 0.40, 0.52)
+	# chunkier bodies read much better from the fixed top-down camera (§1)
+	var r := clampf(0.56 + length * 0.0020, 0.56, 0.72)
 	if is_boss:
 		r *= 1.9
 	return r
 
 func _radius_at(i: int, body_r: float) -> float:
 	var t := float(i) / float(RING_COUNT - 1)
-	var neck := 0.64 + 0.36 * smoothstep(0.0, 0.05, t)   # slim behind head
+	var neck := 0.72 + 0.28 * smoothstep(0.0, 0.06, t)   # slim behind head
 	var r := body_r * neck
+	# eating response: a brief thickening that starts at the head and rides back
+	r *= 1.0 + 0.085 * _pulse * smoothstep(0.0, 0.35, t) * (1.0 - smoothstep(0.55, 0.95, t))
 	r *= 1.0 - 0.94 * smoothstep(0.80, 1.0, t)           # tail taper
 	return maxf(r, 0.004)
 
@@ -336,9 +345,16 @@ func eat(kind: int, growth: float, score_value: int) -> void:
 	score += score_value
 	target_length = minf(max_length, target_length + growth)
 	_mouth_open = 1.0
+	_pulse = 1.0
 	# Chaining orbs rewards a small boost refill — organic pacing incentive.
 	boost_meter = minf(BOOST_MAX, boost_meter + 0.6)
 	ate.emit(self, kind, score_value)
+
+func eat_bite() -> void:
+	# Eating animation (spec §4): quick head lunge + jaw snap. Called together
+	# with the real eat event so the fruit vanishes into the bite.
+	_lunge = 1.0
+	_mouth_open = maxf(_mouth_open, 1.0)
 
 func die(killer_name: String = "") -> void:
 	if not alive:
@@ -381,7 +397,7 @@ func _build_body() -> void:
 	body_mi = MeshInstance3D.new()
 	body_mi.name = "Body"
 	var mesh := ArrayMesh.new()
-	var sides := 13  # ring verts including duplicated seam
+	var sides := 15  # ring verts including duplicated seam — smoother silhouette
 	var verts := PackedVector3Array()
 	var norms := PackedVector3Array()
 	var uvs := PackedVector2Array()
@@ -420,15 +436,25 @@ func _build_body() -> void:
 
 	if _shader == null:
 		_shader = load("res://shaders/snake_body.gdshader")
+		_scale_albedo = load("res://textures/snake_scales_albedo.png")
+		_scale_normal = load("res://textures/snake_scales_normal.png")
+	if _scale_albedo == null or _scale_normal == null:
+		push_warning("Snake scale textures missing — falling back to flat shading")
 	_mat = ShaderMaterial.new()
 	_mat.shader = _shader
 	_mat.set_shader_parameter(&"u_dorsal", dorsal)
 	_mat.set_shader_parameter(&"u_accent", accent)
 	_mat.set_shader_parameter(&"u_belly", belly)
 	_mat.set_shader_parameter(&"u_seed", skin_seed)
+	_mat.set_shader_parameter(&"u_pattern", float(pattern))
 	_mat.set_shader_parameter(&"u_len", length)
 	_mat.set_shader_parameter(&"u_rings", float(RING_COUNT))
 	_mat.set_shader_parameter(&"u_texel", RING_TEXEL)
+	# keep scale sizes believable as the body thickens (boss snakes use ×1.9)
+	_mat.set_shader_parameter(&"u_rep_ar", 5.0 * (_body_radius() / 0.56))
+	_mat.set_shader_parameter(&"u_tile_al", 0.62 * (_body_radius() / 0.56))
+	_mat.set_shader_parameter(&"u_scale", _scale_albedo)
+	_mat.set_shader_parameter(&"u_scale_n", _scale_normal)
 	_mat.set_shader_parameter(&"u_glow", 0.25 if is_boss else 0.0)
 	body_mi.mesh = mesh
 	body_mi.material_override = _mat
@@ -454,9 +480,9 @@ func _build_head() -> void:
 	sm.radial_segments = 18
 	sm.rings = 10
 	skull.mesh = sm
-	skull.scale = Vector3(0.98, 0.74, 1.55)
-	skull.position = Vector3(0, 0.02, 0.55)
-	skull.material_override = _skin_mat(false)
+	skull.scale = Vector3(1.32, 0.95, 1.52)
+	skull.position = Vector3(0, 0.02, 0.52)
+	skull.material_override = _skin_mat(false, Vector2(3.0, 2.2))
 	head_root.add_child(skull)
 
 	# -- snout (tapered muzzle) --
@@ -467,36 +493,36 @@ func _build_head() -> void:
 	sm2.radial_segments = 16
 	sm2.rings = 8
 	snout.mesh = sm2
-	snout.scale = Vector3(0.60, 0.46, 0.95)
-	snout.position = Vector3(0, -0.04, -0.42)
-	snout.material_override = _skin_mat(true)
+	snout.scale = Vector3(0.74, 0.60, 1.05)
+	snout.position = Vector3(0, -0.05, -0.44)
+	snout.material_override = _skin_mat(true, Vector2(3.4, 2.6))
 	head_root.add_child(snout)
 
 	# -- jaw (lower plate, pivots open when eating) --
 	_jaw = Node3D.new()
-	_jaw.position = Vector3(0, -0.14, 0.28)
+	_jaw.position = Vector3(0, -0.14, 0.26)
 	head_root.add_child(_jaw)
 	var jaw_m := MeshInstance3D.new()
 	var bm := BoxMesh.new()
-	bm.size = Vector3(0.42, 0.14, 0.85)
+	bm.size = Vector3(0.58, 0.14, 0.85)
 	jaw_m.mesh = bm
-	jaw_m.position = Vector3(0, 0.04, -0.42)
-	jaw_m.material_override = _skin_mat(true)
+	jaw_m.position = Vector3(0, 0.04, -0.40)
+	jaw_m.material_override = _skin_mat(true, Vector2(2.8, 2.0))
 	_jaw.add_child(jaw_m)
 
-	# -- eyes --
+	# -- eyes: flush against the skull like a real snake, vertical slit pupils --
 	for side in [-1.0, 1.0]:
 		var eye := MeshInstance3D.new()
 		var em := SphereMesh.new()
-		em.radius = 0.115
-		em.height = 0.23
+		em.radius = 0.125
+		em.height = 0.25
 		em.radial_segments = 12
 		em.rings = 8
 		eye.mesh = em
-		eye.position = Vector3(side * 0.315, 0.16, -0.52)
-		eye.scale = Vector3(1.0, 1.0, 0.8)
+		eye.position = Vector3(side * 0.26, 0.10, -0.44)
+		eye.scale = Vector3(1.0, 0.9, 0.7)
 		var mat := StandardMaterial3D.new()
-		mat.albedo_color = Color(0.9, 0.62, 0.18)
+		mat.albedo_color = Color(0.90, 0.60, 0.14)
 		mat.metallic = 0.35
 		mat.roughness = 0.12
 		mat.emission_enabled = true
@@ -505,12 +531,14 @@ func _build_head() -> void:
 		eye.material_override = mat
 		head_root.add_child(eye)
 
+		# vertical slit pupil (viper-like) — a squashed ellipsoid over the eye
 		var pupil := MeshInstance3D.new()
 		var pm := SphereMesh.new()
-		pm.radius = 0.06
-		pm.height = 0.12
+		pm.radius = 0.055
+		pm.height = 0.11
 		pupil.mesh = pm
-		pupil.position = Vector3(side * 0.36, 0.16, -0.585)
+		pupil.position = Vector3(side * 0.305, 0.10, -0.525)
+		pupil.scale = Vector3(0.55, 1.30, 0.42)
 		var pmat := StandardMaterial3D.new()
 		pmat.albedo_color = Color(0.02, 0.02, 0.03)
 		pmat.roughness = 0.25
@@ -523,7 +551,7 @@ func _build_head() -> void:
 		gm.radius = 0.018
 		gm.height = 0.036
 		glint.mesh = gm
-		glint.position = Vector3(side * 0.34, 0.19, -0.50)
+		glint.position = Vector3(side * 0.30, 0.10, -0.475)
 		var gmat := StandardMaterial3D.new()
 		gmat.albedo_color = Color(1, 1, 1)
 		gmat.emission_enabled = true
@@ -538,7 +566,7 @@ func _build_head() -> void:
 		nm.radius = 0.03
 		nm.height = 0.06
 		nostril.mesh = nm
-		nostril.position = Vector3(side * 0.14, 0.09, -1.05)
+		nostril.position = Vector3(side * 0.15, 0.07, -1.02)
 		var nmat := StandardMaterial3D.new()
 		nmat.albedo_color = Color(0.05, 0.05, 0.06)
 		nostril.material_override = nmat
@@ -568,35 +596,48 @@ func _build_head() -> void:
 	sync_head_params(body_r)
 	_flick_timer = randf_range(1.0, 4.0)
 
-func _skin_mat(snout_flavor: bool) -> StandardMaterial3D:
+func _skin_mat(snout_flavor: bool, uv_cells: Vector2 = Vector2(2.6, 2.0)) -> StandardMaterial3D:
+	# Head skin: SAME shared scale texture as the body, tinted by the head
+	# gradient so the head-to-neck transition stays seamless (spec §2).
 	var m := StandardMaterial3D.new()
 	m.albedo_color = _head_tint(snout_flavor)
-	m.roughness = 0.32
-	m.metallic = 0.06
+	if _scale_albedo != null:
+		m.albedo_texture = _scale_albedo
+		m.uv1_scale = Vector3(uv_cells.x, uv_cells.y, 1.0)
+		if _scale_normal != null:
+			m.normal_enabled = true
+			m.normal_texture = _scale_normal
+			m.normal_scale = 0.9
+	m.roughness = 0.34
+	m.metallic = 0.05
 	_skin_mats.append([m, snout_flavor])
 	return m
 
 func _head_tint(snout_flavor: bool) -> Color:
-	return dorsal.darkened(0.15) if snout_flavor else dorsal.darkened(0.05)
+	# head matches the body base so the neck seam disappears from above
+	return dorsal.lightened(0.06) if snout_flavor else dorsal
 
-func apply_skin(d: Color, a: Color, b: Color, seed: float) -> void:
+func apply_skin(d: Color, a: Color, b: Color, seed: float, pat: int = -1) -> void:
 	# Live reskin: body shader params + stored head materials recolor in place.
 	dorsal = d
 	accent = a
 	belly = b
 	skin_seed = seed
+	if pat >= 0:
+		pattern = clampi(pat, 0, 4)
 	if _mat != null:
 		_mat.set_shader_parameter(&"u_dorsal", dorsal)
 		_mat.set_shader_parameter(&"u_accent", accent)
 		_mat.set_shader_parameter(&"u_belly", belly)
 		_mat.set_shader_parameter(&"u_seed", skin_seed)
+		_mat.set_shader_parameter(&"u_pattern", float(pattern))
 	for rec in _skin_mats:
 		(rec[0] as StandardMaterial3D).albedo_color = _head_tint(bool(rec[1]))
 
 func sync_head_params(body_r: float) -> void:
 	# Scale entire head rig with body radius so proportions stay believable
-	# while growing. 0.80 factor keeps the skull width believable vs the neck.
-	var s: float = (body_r / 0.4) * 0.80
+	# while growing. 0.82 factor keeps the skull width believable vs the neck.
+	var s: float = (body_r / 0.56) * 0.82
 	if head_root:
 		head_root.scale = Vector3(s, s, s)
 	# head cap elasticity handled in _update_head
@@ -619,15 +660,19 @@ func _update_head(delta: float) -> void:
 	target_basis = target_basis.rotated(target_basis.x, breathe)
 	# Smooth ROTATION only (scale kept separate — Basis.slerp needs pure rotation).
 	_head_rot = _head_rot.slerp(target_basis, clampf(13.0 * delta, 0.0, 1.0))
-	var s: float = (body_r / 0.4) * 0.80
+	var s: float = (body_r / 0.56) * 0.82
 	var b := _head_rot.scaled(Vector3(s, s, s))
-	head_root.transform = Transform3D(b, p0 + fwd * (body_r * 0.28))
+	# eat animation: quick forward lunge + jaw snap while the fruit flies in
+	_lunge = maxf(0.0, _lunge - delta * 3.3)
+	var lunge_q := 1.0 - _lunge
+	var lunge_amt := sin(minf(lunge_q, 1.0) * PI) if _lunge > 0.0 else 0.0
+	head_root.transform = Transform3D(b, p0 + fwd * (body_r * 0.22) + fwd * lunge_amt * body_r * 0.9)
 
-	# mouth open/close
+	# mouth open/close (lunge adds a quick extra snap)
 	if _mouth_open > 0.0:
 		_mouth_open = maxf(0.0, _mouth_open - delta * 2.4)
 	if _jaw:
-		_jaw.rotation.x = _mouth_open * 0.62
+		_jaw.rotation.x = _mouth_open * 0.62 + lunge_amt * 0.35
 
 	# tongue flick cycle
 	_flick_timer -= delta

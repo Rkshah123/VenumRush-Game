@@ -11,6 +11,8 @@ var state := State.MENU
 var _arena_key := "valley"
 var _cam_angle := 0.0
 var _cam_pos := Vector3(0, 18, 38)
+var _topdown_dist := 0.0        # fixed camera distance fitting the whole arena
+var _topdown_dirty := true
 var _cam_look := Vector3.ZERO
 var _player_last_head := Vector3.ZERO
 
@@ -18,6 +20,7 @@ var _player_last_head := Vector3.ZERO
 var _autoplay := false
 var _closeup := false
 var _shot_menu := false
+var _shot_skins := false
 var _shot_game := false
 var _quit_at := -1.0
 var _no_death_dev := false
@@ -102,6 +105,9 @@ func _ready() -> void:
 	add_child(cam)
 	cam.position = _cam_pos
 	cam.look_at_from_position(_cam_pos, Vector3.ZERO, Vector3.UP)
+	# Fixed top-down arena camera (spec §1): recompute the fit whenever the
+	# window/aspect changes so the WHOLE playable circle stays in frame.
+	get_viewport().size_changed.connect(func(): _topdown_dirty = true)
 
 	hud.play_pressed.connect(func(): _start_play())
 	hud.quit_pressed.connect(func(): _quit_nicely())
@@ -126,13 +132,15 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
 			keep = true
 			if src == "--shot-menu":
 				_shot_menu = true
+			if src == "--shot-skins":
+				_shot_skins = true
 		elif src.begins_with("--arena="):
 			keep = true
 			var k := src.substr(8)
@@ -171,6 +179,13 @@ func _dev_sequence() -> void:
 		return
 	if _shot_menu:
 		await _snap("shot_menu.png")
+	if _shot_skins:
+		# visual QA of the SNAKES page: switch to it, shot, then quit
+		hud._menu_page("skins")
+		await get_tree().create_timer(1.2).timeout
+		await _snap("shot_skins.png")
+		_quit_nicely()
+		return
 	await get_tree().create_timer(0.6).timeout
 	_start_play()
 	print("DEV: play started")
@@ -295,6 +310,8 @@ func _skins_test_run() -> void:
 func _powertest_run() -> void:
 	# Power-orb QA: magnet vacuums fruit (score rate), timed expiry works,
 	# shield toggles cleanly. Ability bar visibility checked via screenshot.
+	# QA isolates the POWER mechanics — snake survival is not under test here.
+	match_world.no_death = true
 	var p: PlayerSnake = match_world.player
 	if p == null:
 		print("POWERTEST FAIL no player")
@@ -361,7 +378,7 @@ func _start_play() -> void:
 	if match_world.player != null:
 		var skin_idx := _skin_dev if _skin_dev >= 0 else int(SaveMgr.get_value("skin", 0))
 		var sk := SkinCatalog.get_skin(skin_idx)
-		match_world.player.apply_skin(sk["dorsal"], sk["accent"], sk["belly"], sk["seed"])
+		match_world.player.apply_skin(sk["dorsal"], sk["accent"], sk["belly"], sk["seed"], int(sk["pattern"]))
 		print("SKIN apply=", sk["name"], " idx=", skin_idx)
 	AudioMgr.play("spawn")
 	hud.announce("SURVIVE", "COLLECT ORBS — GROW — ELIMINATE RIVALS")
@@ -496,7 +513,7 @@ func _physics_process(delta: float) -> void:
 				# cinematic menu orbit around arena action
 				var focus := _demo_focus()
 				_cam_angle += delta * 0.08
-				var pos := focus + Vector3(cos(_cam_angle) * 30.0, 15.0, sin(_cam_angle) * 30.0)
+				var pos := focus + Vector3(cos(_cam_angle) * 42.0, 24.0, sin(_cam_angle) * 42.0)
 				var look := focus + Vector3.UP * 2.0
 				_cam_pos = _cam_pos.lerp(pos, 1.0 - exp(-2.2 * delta))
 				_cam_look = _cam_look.lerp(look, 1.0 - exp(-2.2 * delta))
@@ -516,7 +533,7 @@ func _physics_process(delta: float) -> void:
 						_diag_t = 0.0
 						print("DIAG ", p.debug_state())
 				else:
-					_chase_camera(delta)
+					_topdown_camera(delta)
 			elif not _quit_at > 0.0 and state == State.OVER:
 				# gentle orbit during results
 				_cam_angle += delta * 0.05
@@ -540,25 +557,66 @@ func _demo_focus() -> Vector3:
 		c += Vector3(s.head_pos.x, 0, s.head_pos.z)
 	return c / float(alive.size())
 
-func _chase_camera(delta: float) -> void:
+func _topdown_camera(delta: float) -> void:
+	# Fixed, slightly-tilted top-down camera (spec §1): the whole playable
+	# circle stays in frame at any aspect ratio; steering projections and HUD
+	# keep working because the view direction is still ground-projected.
 	var p := match_world.player
 	if p == null or not is_instance_valid(p):
 		return
-	var head := p.head_pos
-	_player_last_head = head
-	var fwd := Vector3(sin(p.heading), 0.0, cos(p.heading))
-	# boost speed-kick: FOV widens and the camera looks further ahead while boosting
-	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * (Snake.BOOST_MULT - 1.0)), 0.0, 1.0)
-	var len_extra := clampf(p.length * 0.045, 0.0, 2.6)
-	var dist := 8.5 + len_extra + (1.4 if p.boost_active else 0.0)
-	var height := 4.4 + len_extra * 0.7
-	var desired := head - fwd * dist + Vector3.UP * height
-	_cam_pos = _cam_pos.lerp(desired, 1.0 - exp(-5.5 * delta))
-	var look_target := head + fwd * (4.2 + boost_k * 2.4) + Vector3.UP * 1.0
-	_cam_look = _cam_look.lerp(look_target, 1.0 - exp(-7.0 * delta))
+	_player_last_head = p.head_pos
+	if _topdown_dirty or _topdown_dist <= 0.0:
+		_topdown_fit()
+	cam.fov = 55.0
+	var tilt := 0.36  # radians from vertical — enough for depth, keeps fit stable
+	var dir := Vector3(0.0, cos(tilt), sin(tilt))
+	var desired := Vector3.ZERO + dir * _topdown_dist
+	# ease toward the fixed pose (nice slide after the cinematic menu orbit)
+	if _topdown_dist > 0.0:
+		_cam_pos = _cam_pos.lerp(desired, 1.0 - exp(-4.5 * delta))
 	cam.global_position = _cam_pos
+	_cam_look = _cam_look.lerp(Vector3.ZERO + Vector3.UP * 0.5, 1.0 - exp(-4.5 * delta))
 	cam.look_at(_cam_look, Vector3.UP)
-	cam.fov = lerpf(cam.fov, 70.0 + boost_k * 10.0, 1.0 - exp(-6.0 * delta))
+
+func _topdown_fit() -> void:
+	# Bisection on the camera distance so every rim point of the play circle
+	# fits inside the frustum (both axes) with a small margin. Re-run on resize.
+	var R: float = match_world.arena_radius + 3.0
+	var tilt := 0.36
+	var dir := Vector3(0.0, cos(tilt), sin(tilt))     # camera sits south of center
+	var view := -dir                                  # looking north/down
+	var right := Vector3(1.0, 0.0, 0.0)
+	var up := right.cross(view).normalized()          # camera-up axis (world)
+	var tan_v := tan(deg_to_rad(cam.fov) * 0.5) * 0.94
+	var aspect := 1.6
+	var vp := get_viewport()
+	if vp != null and vp.get_visible_rect().size.y > 0.0:
+		aspect = vp.get_visible_rect().size.x / vp.get_visible_rect().size.y
+	var tan_h := tan_v * aspect
+	var ok := func(d: float) -> bool:
+		var cp := dir * d
+		for i in 24:
+			var ang := TAU * float(i) / 24.0
+			var P := Vector3(sin(ang) * R, 0.0, cos(ang) * R)
+			var rel := P - cp
+			var along := rel.dot(view)
+			if along < 0.1:
+				return false
+			if absf(rel.dot(up)) / along > tan_v:
+				return false
+			if absf(rel.dot(right)) / along > tan_h:
+				return false
+		return true
+	var lo := 12.0
+	var hi := 420.0
+	for it in 26:
+		var mid := (lo + hi) * 0.5
+		if ok.call(mid):
+			hi = mid
+		else:
+			lo = mid
+	_topdown_dist = hi
+	_topdown_dirty = false
 
 # ---------------------------------------------------------------- app defaults
 

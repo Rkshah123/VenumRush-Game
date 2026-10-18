@@ -24,8 +24,8 @@ AudioMgr="*res://scripts/core/audio_manager.gd"
 
 [display]
 
-window/size/viewport_width=1600
-window/size/viewport_height=900
+window/size/viewport_width=1280
+window/size/viewport_height=720
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 handheld/orientation=4

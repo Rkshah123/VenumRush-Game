@@ -6,6 +6,11 @@ render_mode cull_disabled, diffuse_lambert, specular_schlick_ggx;
 // shader reshapes it along a spine stored in a per-snake data texture
 // (RGBA32F: xyz = station pos relative to the head, w = station radius).
 // Undulation, growth and turning are baked into the spine on the CPU.
+//
+// Fragment: shared grayscale scale texture (Texture/snake_scales_*) tinted by
+// the snake's palette, a derived normal map for scale relief, and one of five
+// lengthwise pattern modes selected per skin (0 plain, 1 saddle bands,
+// 2 light blotches, 3 viper zigzag, 4 accent stripes).
 
 uniform sampler2D u_spine : filter_linear, repeat_disable;
 uniform float u_texel = 0.0026041667; // 1 / RING_COUNT (keep in sync with GDScript)
@@ -16,6 +21,11 @@ uniform vec4 u_dorsal = vec4(0.05, 0.5, 0.42, 1.0);
 uniform vec4 u_accent = vec4(0.9, 0.2, 0.55, 1.0);
 uniform vec4 u_belly = vec4(0.85, 0.76, 0.55, 1.0);
 uniform float u_seed = 0.3;
+uniform float u_pattern = 0.0;        // 0..4 — see header
+uniform sampler2D u_scale : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D u_scale_n : filter_linear_mipmap, repeat_enable;
+uniform float u_rep_ar = 5.0;         // texture repeats around the circumference
+uniform float u_tile_al = 0.62;       // meters along the body per texture tile
 uniform float u_motion = 1.0;         // 0..1.3 — movement energy
 uniform float u_glow = 0.0;
 uniform float u_dbg = 0.0;            // dev: flat ribbon diagnostic (bypasses spine texture)
@@ -67,55 +77,70 @@ void fragment() {
 	float belly_f = smoothstep(0.30, -0.30, topness);
 
 	float s_m = UV.y * (u_rings - 1.0) * u_ds; // meters along the body
+	float pr1 = fract(u_seed * 7.31);
+	float pr2 = fract(u_seed * 3.77 + 0.41);
 
-	// --- Scales: staggered diamond cells, physically aligned with body flow ---
-	float row = floor(s_m / 0.16);
-	float alt = mod(row, 2.0);
-	float uc = fract(UV.x * 9.0 + alt * 0.5);
-	float vc = fract(s_m / 0.16);
-	vec2 cell = (vec2(uc, vc) - 0.5) * vec2(1.0, 1.12);
-	float d = length(cell);
-	float scale_center = smoothstep(0.46, 0.24, d); // 1 center, 0 in gaps
-	float scale_edge   = smoothstep(0.30, 0.44, d);
+	// --- Shared scale texture (grayscale, tinted per snake) ---
+	vec2 suv = vec2(UV.x * u_rep_ar, s_m / u_tile_al);
+	float sv = texture(u_scale, suv).r;
 
-	// --- Lengthwise pattern: soft bands seeded per snake ---
-	float band_period = 1.25 + 0.6 * fract(u_seed * 17.3);
-	float band = smoothstep(0.35, 0.62, abs(fract(s_m / band_period + u_seed) - 0.5) * 2.0);
+	// --- Pattern layer (lengthwise, seeded per snake) ---
+	float pat_m = 0.0;
+	vec3 pat_col = u_dorsal.rgb;
+	float pat = u_pattern;
+	if (pat > 0.5 && pat < 1.5) {
+		// dark saddle bands (banded colubrids / coral kin)
+		float period = 1.9 + 1.3 * pr1;
+		float w = fract(s_m / period + u_seed);
+		pat_m = smoothstep(0.30, 0.48, w) * smoothstep(0.70, 0.52, w);
+		pat_col = u_dorsal.rgb * 0.34;
+	} else if (pat > 1.5 && pat < 2.5) {
+		// light blotches with darker rims (python)
+		float dy = fract(s_m / 2.6 + pr2) - 0.5;
+		float dx = fract(UV.x * 3.0 + pr2 * 9.1) - 0.5;
+		float bd = length(vec2(dx * 0.55, dy));
+		pat_m = smoothstep(0.30, 0.16, bd) * (1.0 - belly_f * 0.85);
+		pat_col = (u_dorsal.rgb * 0.42 + u_belly.rgb * 0.58);
+	} else if (pat > 2.5 && pat < 3.5) {
+		// viper zigzag ribbon along the spine
+		float tri = abs(fract(s_m / 1.05 + pr1) - 0.5) * 2.0;
+		float xx = mix(0.30, 0.70, tri);
+		pat_m = smoothstep(0.115, 0.05, abs(UV.x - xx)) * (1.0 - belly_f * 0.85);
+		pat_col = mix(u_dorsal.rgb, vec3(0.085, 0.075, 0.045), 0.72);
+	} else if (pat > 3.5) {
+		// twin accent stripes + soft dorsal line
+		float s1 = smoothstep(0.085, 0.03, abs(UV.x - 0.27));
+		float s2 = smoothstep(0.085, 0.03, abs(UV.x - 0.73));
+		float s0 = smoothstep(0.07, 0.02, abs(UV.x - 0.5));
+		pat_m = clamp(s1 + s2 + s0 * 0.55, 0.0, 1.0) * (1.0 - belly_f * 0.9);
+		pat_col = mix(u_dorsal.rgb, u_accent.rgb, 0.50);
+	}
+	pat_m *= smoothstep(0.10, 0.55, s_m); // let the head zone stay clean
 
-	// --- Spots: subtle accent diamonds ---
-	float spot = smoothstep(0.16, 0.03,
-		abs(abs(fract(uc * 2.7 + s_m / 2.9 + u_seed * 0.7) - 0.5)
-		  + abs(fract(s_m / 2.2 + u_seed * 0.13) - 0.5) - 0.44));
-
-	vec4 dorsal = u_dorsal;
-	// Saddle bands + spots stay in the same hue family as the base skin (real
-	// snakes read as tonal variation, not sticker contrast).
-	vec3 accent_warm = mix(u_dorsal.rgb, u_accent.rgb, 0.38);
-	dorsal.rgb = mix(u_dorsal.rgb, accent_warm, band * 0.42 + spot * 0.30);
+	// --- Base color assembly ---
+	vec3 col = u_dorsal.rgb * (0.58 + 0.62 * sv);           // textured scales
+	col = mix(col, pat_col * (0.72 + 0.42 * sv), pat_m);    // pattern over scales
 	// Dorsal line accent along the spine (many colubrids have one)
 	float dorsal_line = smoothstep(0.16, 0.0, topness) * (1.0 - belly_f);
-	dorsal.rgb = mix(dorsal.rgb, accent_warm, dorsal_line * 0.22);
-
-	vec3 col = mix(dorsal.rgb, u_belly.rgb, belly_f);
-
-	// Skin tone eases from the head's own tint into the body pattern so the
-	// head-to-neck transition has no visible seam.
+	col = mix(col, mix(u_dorsal.rgb, u_accent.rgb, 0.38), dorsal_line * 0.20);
+	// Belly plate: light, smoother, faint scale
+	col = mix(col, u_belly.rgb * (0.86 + 0.22 * sv), belly_f);
+	// Skin tone eases from the head's own tint into the body pattern
 	float head_fade = smoothstep(0.18, 0.85, s_m);
-	col = mix(u_dorsal.rgb * 0.86, col, head_fade);
-	col *= 0.84 + 0.22 * scale_center * head_fade;
+	col = mix(u_dorsal.rgb * 0.88, col, head_fade);
 
-	// --- Micro-normal from scale relief ---
+	// --- Normal from the shared relief map ---
 	vec3 N = NORMAL;
 	if (!FRONT_FACING) N = -N;
 	vec3 T = normalize(cross(v_axis, N) + vec3(0.0001));
 	vec3 Bt = normalize(cross(N, T));
-	float bu = (uc - 0.5) * scale_center * 0.5;
-	float bv = (vc - 0.5) * scale_center * 0.5;
-	N = normalize(N + T * bu * 0.42 + Bt * bv * 0.42);
+	vec2 nt = texture(u_scale_n, suv).rg * 2.0 - 1.0;
+	float nstr = 1.05 * (1.0 - belly_f * 0.65) * head_fade;
+	N = normalize(N + T * nt.x * nstr + Bt * nt.y * nstr * 0.75);
 	NORMAL = N;
 
 	ALBEDO = col;
-	ROUGHNESS = 0.36 + 0.26 * scale_edge + 0.18 * belly_f;
-	SPECULAR = 0.45;
-	EMISSION = u_accent.rgb * (u_glow * (0.25 + 0.4 * dorsal_line + band * 0.2));
+	ROUGHNESS = clamp(0.30 + 0.30 * (1.0 - sv) + 0.14 * belly_f + 0.10 * pat_m, 0.2, 0.85);
+	SPECULAR = 0.48;
+	EMISSION = u_accent.rgb * (u_glow * (0.25 + 0.4 * dorsal_line + pat_m * 0.2));
 }

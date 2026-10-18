@@ -250,6 +250,27 @@ func push_score_popup(text: String, color: Color = COL_ACCENT) -> void:
 	tw.tween_property(lab, "modulate:a", 0.0, 0.85).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
 	tw.chain().tween_callback(lab.queue_free)
 
+func push_score_popup_at(text: String, color: Color, world_pos: Vector3) -> void:
+	# Floating "+N" anchored to the eaten fruit's projected screen position
+	# (spec §4). Falls back to the lower-center popup when projection fails.
+	var cam := get_viewport().get_camera_3d()
+	if _pop_layer == null or cam == null or cam.is_position_behind(world_pos):
+		push_score_popup(text, color)
+		return
+	var sp: Vector2 = cam.unproject_position(world_pos + Vector3.UP * 0.9)
+	var vs := get_viewport().get_visible_rect().size
+	if sp.x < -60 or sp.y < -60 or sp.x > vs.x + 60 or sp.y > vs.y + 60:
+		push_score_popup(text, color)
+		return
+	var lab := _mk_label(text, 22, color, _pop_layer)
+	lab.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lab.position = sp + Vector2(-40, -30)
+	var tw := lab.create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(lab, "position:y", lab.position.y - 46.0, 0.8).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_QUAD)
+	tw.tween_property(lab, "modulate:a", 0.0, 0.8).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
+	tw.chain().tween_callback(lab.queue_free)
+
 func announce(title: String, sub: String = "") -> void:
 	if announce_label == null:
 		return
@@ -410,7 +431,7 @@ func _build_skins_menu(vroot: Container) -> void:
 	_preview_snake.set_physics_process(false)   # starts when the skins page opens
 	var cur := int(SaveMgr.get_value("skin", 0))
 	var sk0 := SkinCatalog.get_skin(cur)
-	_preview_snake.apply_skin(sk0["dorsal"], sk0["accent"], sk0["belly"], sk0["seed"])
+	_preview_snake.apply_skin(sk0["dorsal"], sk0["accent"], sk0["belly"], sk0["seed"], int(sk0["pattern"]))
 
 	# grid of skin buttons
 	var grid := GridContainer.new()
@@ -447,7 +468,7 @@ func _pick_skin(i: int) -> void:
 	_refresh_skin_buttons()
 	var sk := SkinCatalog.get_skin(i)
 	if _preview_snake != null:
-		_preview_snake.apply_skin(sk["dorsal"], sk["accent"], sk["belly"], sk["seed"])
+		_preview_snake.apply_skin(sk["dorsal"], sk["accent"], sk["belly"], sk["seed"], int(sk["pattern"]))
 
 func _process(delta: float) -> void:
 	if _menu_skins != null and _menu_skins.visible and _preview_snake != null and _preview_vp != null:
