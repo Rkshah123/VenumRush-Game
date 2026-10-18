@@ -27,6 +27,7 @@ var _onscreen_test := false
 var _arena_test := false
 var _touch_test := false
 var _spawntest := false
+var _powertest := false
 var _diag_t := 0.0
 
 func _ready() -> void:
@@ -69,6 +70,9 @@ func _ready() -> void:
 		if a == "--spawntest":
 			_autoplay = true
 			_spawntest = true
+		if a == "--powertest":
+			_autoplay = true
+			_powertest = true
 	_arena_key = str(SaveMgr.get_value("arena", "valley"))
 	if arena_dev != "" and ArenaPresets.ALL.has(arena_dev):
 		_arena_key = arena_dev
@@ -115,7 +119,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--arena-test", "--touch-test", "--spawntest"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--arena-test", "--touch-test", "--spawntest", "--powertest"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -163,6 +167,9 @@ func _dev_sequence() -> void:
 		await get_tree().create_timer(7.0).timeout
 		print("SPAWNTEST done — survives=", match_world.player != null and match_world.player.alive)
 		_quit_nicely()
+		return
+	if _powertest:
+		await _powertest_run()
 		return
 	if _quit_at > 0.0:
 		await get_tree().create_timer(_quit_at * 0.5).timeout
@@ -230,6 +237,33 @@ func _touch_test_run() -> void:
 	# cleanup + quit
 	_touch_tap(0, false, Vector2(vs.x * 0.28, vs.y * 0.5))
 	await get_tree().create_timer(0.2).timeout
+	_quit_nicely()
+
+# ---------------------------------------------------------------- power QA
+
+func _powertest_run() -> void:
+	# Power-orb QA: magnet vacuums fruit (score rate), timed expiry works,
+	# shield toggles cleanly. Ability bar visibility checked via screenshot.
+	var p: PlayerSnake = match_world.player
+	if p == null:
+		print("POWERTEST FAIL no player")
+		_quit_nicely()
+		return
+	await get_tree().create_timer(1.0).timeout
+	p.apply_ability("magnet")
+	print("POWERTEST magnet-on %s" % ("PASS" if p.ability_active("magnet") else "FAIL"))
+	var s0: int = p.score
+	await get_tree().create_timer(2.0).timeout
+	await _snap("shot_power.png")
+	await get_tree().create_timer(3.4).timeout
+	var gained: int = p.score - s0
+	print("POWERTEST magnet-gain=%d %s" % [gained, "PASS" if gained >= 25 else "FAIL"])
+	print("POWERTEST magnet-off %s" % ("PASS" if not p.ability_active("magnet") else "FAIL"))
+	p.apply_ability("shield")
+	print("POWERTEST shield-on %s" % ("PASS" if p.ability_active("shield") else "FAIL"))
+	await get_tree().create_timer(4.2).timeout
+	print("POWERTEST shield-off %s" % ("PASS" if not p.ability_active("shield") else "FAIL"))
+	print("POWERTEST alive %s" % ("PASS" if p.alive else "FAIL"))
 	_quit_nicely()
 
 func _snap(fname: String) -> void:

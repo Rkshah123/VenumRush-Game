@@ -311,12 +311,14 @@ func _head_collisions() -> void:
 		if s.head_fatal_grace_active():
 			continue
 
-		# boundary barrier
+		# boundary barrier (Shield does not protect against the barrier)
 		if s.head_pos.length() > arena_radius - 0.52:
 			_kill(s, null, "the barrier")
 			continue
 
-		# other snakes' bodies
+		# other snakes' bodies (Shield absorbs body hits while active)
+		if s.ability_active("shield"):
+			continue
 		var hr: float = s.head_radius()
 		var bx := int(floor(s.head_pos.x / _cell))
 		var bz := int(floor(s.head_pos.z / _cell))
@@ -394,9 +396,24 @@ func _eat_checks() -> void:
 		if not is_instance_valid(s) or not s.alive:
 			continue
 		var reach: float = s.head_radius() + 0.55
+		if s.ability_active("magnet"):
+			reach *= 4.5
 		var hits: Array = food.eat_hits(s.head_pos, reach)
 		for h in hits:
 			var k := int(h["kind"])
+			if k == 3:
+				# POWER ORB: activates a random ability on the eater
+				food.remove_orb_at_pos(k, h["pos"])
+				var ab := "magnet" if randf() < 0.5 else "shield"
+				s.apply_ability(ab)
+				if verbose:
+					print("POWER: %s -> %s (%.1fs)" % [s.display_name, ab, s.ability_left])
+				if s.is_player:
+					AudioMgr.play("eat_gold")
+					match_event.emit("eat", "MAGNET PULSE" if ab == "magnet" else "SHIELD")
+					if hud != null and is_instance_valid(hud):
+						hud.push_score_popup("MAGNET PULSE" if ab == "magnet" else "SHIELD UP", GameHud.COL_WARN)
+				continue
 			if s.is_player:
 				AudioMgr.play("eat" if k == 0 else ("eat_rare" if k == 1 else "eat_gold"))
 				var sv := int(FoodSpawner.KIND_SCORE[k])
@@ -425,6 +442,10 @@ func _update_hud() -> void:
 	hud.set_rank(rank, alive.size())
 	hud.set_boost(player.boost_meter / Snake.BOOST_MAX)
 	hud.set_boosting(player.boost_active)
+	if player.ability != "" and player.ability_left > 0.0:
+		hud.set_ability("MAGNET PULSE" if player.ability == "magnet" else "SHIELD", player.ability_frac())
+	else:
+		hud.set_ability("", 0.0)
 	hud.set_timer(match_time)
 	hud.set_kills(player.kills)
 

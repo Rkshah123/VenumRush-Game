@@ -49,6 +49,13 @@ var _head_rot := Basis.IDENTITY    # smoothed pure-rotation basis of the head
 var boost_active := false
 var boost_meter := BOOST_MAX
 
+# --- power-orb abilities (Magnet Pulse / Shield) ---
+const ABILITY_DUR := {"magnet": 5.0, "shield": 4.0}
+var ability := ""
+var ability_left := 0.0
+var _ability_dur := 1.0
+var _halo: MeshInstance3D
+
 # Steering contract for subclasses:
 var desired_dir := Vector3(0, 0, 1)
 var input_boost := false
@@ -96,6 +103,26 @@ func _ready() -> void:
 	_perp.resize(RING_COUNT)
 	_build_body()
 	_build_head()
+	# shield halo: emissive shell around the head, shown while Shield is up
+	var hm := SphereMesh.new()
+	hm.radius = 0.62
+	hm.height = 1.24
+	hm.radial_segments = 14
+	hm.rings = 7
+	_halo = MeshInstance3D.new()
+	_halo.mesh = hm
+	var hmat := StandardMaterial3D.new()
+	hmat.albedo_color = Color(0.45, 0.95, 1.0, 0.30)
+	hmat.emission_enabled = true
+	hmat.emission = Color(0.45, 0.95, 1.0)
+	hmat.emission_energy_multiplier = 1.3
+	hmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	hmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	hmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_halo.material_override = hmat
+	_halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_halo.visible = false
+	add_child(_halo)
 
 # ------------------------------------------------------------------ lifecycle
 
@@ -130,6 +157,13 @@ func _physics_process(delta: float) -> void:
 	if hold_heading > -900.0:
 		desired_dir = Vector3(sin(hold_heading), 0.0, cos(hold_heading))
 		input_boost = false
+
+	# --- power ability timer ---
+	if ability_left > 0.0:
+		ability_left = maxf(0.0, ability_left - delta)
+		if ability_left <= 0.0:
+			ability = ""
+	_halo.visible = ability_active("shield")
 
 	# --- boost ---
 	if input_boost and boost_meter > 0.05:
@@ -174,6 +208,21 @@ func _physics_process(delta: float) -> void:
 
 func _steer(_delta: float) -> void:
 	pass  # subclasses fill desired_dir / input_boost
+
+# ------------------------------------------------------------------ abilities
+
+func apply_ability(id: String, dur: float = -1.0) -> void:
+	if not ABILITY_DUR.has(id):
+		return
+	ability = id
+	_ability_dur = dur if dur > 0.0 else ABILITY_DUR[id]
+	ability_left = _ability_dur
+
+func ability_active(id: String) -> bool:
+	return ability == id and ability_left > 0.0
+
+func ability_frac() -> float:
+	return clampf(ability_left / maxf(_ability_dur, 0.01), 0.0, 1.0) if ability != "" else 0.0
 
 # ------------------------------------------------------------------ body sim
 

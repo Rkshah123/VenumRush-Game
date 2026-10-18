@@ -9,13 +9,16 @@ extends Node3D
 ## Slot layout per kind (pool capacity, includes death-drop head-room):
 ##   apple pool 150, berries pool 30, mango pool 20  (sum >= HARD_CAP)
 
-const KIND_TARGETS := [40, 6, 2]
-const KIND_GROWTH := [0.5, 0.95, 1.4]
-const KIND_SCORE := [10, 30, 75]
-const KIND_COLORS := [Color(0.92, 0.16, 0.12), Color(0.55, 0.25, 0.75), Color(1.0, 0.78, 0.25)]
-const KIND_RADIUS := [0.3, 0.34, 0.4]
-const KIND_POOL := [150, 30, 20]
-const HARD_CAP := 170   # absolute fruit budget — death drops respect this cap
+const KIND_TARGETS := [40, 6, 2, 2]
+const KIND_GROWTH := [0.5, 0.95, 1.4, 0.4]
+const KIND_SCORE := [10, 30, 75, 15]
+const KIND_COLORS := [Color(0.92, 0.16, 0.12), Color(0.55, 0.25, 0.75), Color(1.0, 0.78, 0.25), Color(0.42, 0.92, 1.0)]
+const KIND_RADIUS := [0.3, 0.34, 0.4, 0.35]
+const KIND_POOL := [150, 30, 20, 8]
+const HARD_CAP := 178   # absolute fruit budget — death drops respect this cap
+const BOB_BASE := [0.34, 0.34, 0.34, 0.52]
+const BOB_AMP := [0.07, 0.07, 0.07, 0.13]
+const BOB_SPD := [2.0, 2.0, 2.0, 3.4]
 
 var arena_radius := 55.0
 var obstacles: Array = []
@@ -32,7 +35,7 @@ var _pop_hits := 0
 # ---------------------------------------------------------------- lifecycle
 
 func _ready() -> void:
-	_slots = [_make_pool(0, _real_fruit_mesh(0)), _make_pool(1, _real_fruit_mesh(1)), _make_pool(2, _real_fruit_mesh(2))]
+	_slots = [_make_pool(0, _real_fruit_mesh(0)), _make_pool(1, _real_fruit_mesh(1)), _make_pool(2, _real_fruit_mesh(2)), _make_pool(3, _power_mesh())]
 	_pop_mesh = SphereMesh.new()
 	_pop_mesh.radius = 0.09
 	_pop_mesh.height = 0.18
@@ -86,8 +89,10 @@ func reset() -> void:
 			free.append(int(idx))
 		alive.clear()
 	_total = 0
-	_deficit = [0, 0, 0]
-	for kind in 3:
+	_deficit = []
+	_deficit.resize(KIND_TARGETS.size())
+	for kind in KIND_TARGETS.size():
+		_deficit[kind] = 0
 		for i in KIND_TARGETS[kind]:
 			_spawn_orb(kind)
 
@@ -100,7 +105,7 @@ func count_alive() -> int:
 
 func debug_state() -> String:
 	var parts: Array[String] = []
-	for kind in 3:
+	for kind in KIND_TARGETS.size():
 		var s: Dictionary = _slots[kind]
 		parts.append("k%d alive=%d free=%d def=%d" % [kind, (s["alive"] as Dictionary).size(), (s["free"] as Array).size(), _deficit[kind]])
 	return "total=%d " % _total + " ".join(parts)
@@ -147,7 +152,7 @@ func alive_positions() -> Array:
 func eat_hits(head_pos: Vector3, reach: float) -> Array:
 	# All fruits in reach of a snake head: [{pos: Vector3, kind: int}]
 	var out: Array = []
-	for kind in 3:
+	for kind in KIND_TARGETS.size():
 		var alive: Dictionary = _slots[kind]["alive"]
 		var rr: float = reach + float(kind) * 0.03 + KIND_RADIUS[kind] * 0.5
 		for idx in alive.keys():
@@ -201,7 +206,7 @@ func pop_at(pos: Vector3, kind: int) -> void:
 
 func _process(delta: float) -> void:
 	var t := Time.get_ticks_msec() * 0.001
-	for kind in 3:
+	for kind in KIND_TARGETS.size():
 		var s: Dictionary = _slots[kind]
 		var alive: Dictionary = s["alive"]
 		var mm: MultiMesh = s["mm"]
@@ -209,12 +214,12 @@ func _process(delta: float) -> void:
 			var rec: Dictionary = alive[idx]
 			var ph: float = rec["phase"]
 			var p: Vector3 = rec["pos"]
-			var yaw := sin(t * 0.7 + ph) * 0.28
-			var yy := 0.34 + sin(t * 2.0 + ph) * 0.07
+			var yaw := sin(t * 0.7 + ph) * 0.28 + (t * 2.2 if kind == 3 else 0.0)
+			var yy: float = BOB_BASE[kind] + sin(t * BOB_SPD[kind] + ph) * BOB_AMP[kind]
 			var basis := Basis(Vector3.UP, yaw)
 			mm.set_instance_transform(idx, Transform3D(basis, p + Vector3(0.0, yy, 0.0)))
 	# trickle respawn (top: 1 per frame) — also respects the global budget
-	for kind in 3:
+	for kind in KIND_TARGETS.size():
 		if _deficit[kind] > 0 and _total < HARD_CAP:
 			_deficit[kind] -= 1
 			_spawn_orb(kind)
@@ -251,6 +256,32 @@ func _real_fruit_mesh(kind: int) -> Mesh:
 		else:
 			st.set_material(_fruit_base_mat(KIND_COLORS[kind].lightened(0.08), OBJ_EMIT[kind], 0.34))
 		st.commit(am)
+	var sbl := SurfaceTool.new()
+	_blob_surface(sbl)
+	sbl.commit(am)
+	return am
+
+func _power_mesh() -> Mesh:
+	# power orb: bright emissive core + spinning cyan ring + shadow blob
+	var am := ArrayMesh.new()
+	var st := SurfaceTool.new()
+	var core := SphereMesh.new()
+	core.radius = 0.16
+	core.height = 0.32
+	core.radial_segments = 12
+	core.rings = 8
+	st.append_from(core, 0, Transform3D())
+	st.set_material(_fruit_base_mat(Color(0.82, 0.99, 1.0), 1.5, 0.2))
+	st.commit(am)
+	var sr := SurfaceTool.new()
+	var ring := TorusMesh.new()
+	ring.inner_radius = 0.22
+	ring.outer_radius = 0.28
+	ring.rings = 22
+	ring.ring_segments = 8
+	sr.append_from(ring, 0, Transform3D())
+	sr.set_material(_fruit_base_mat(Color(0.42, 0.92, 1.0), 1.0, 0.25))
+	sr.commit(am)
 	var sbl := SurfaceTool.new()
 	_blob_surface(sbl)
 	sbl.commit(am)

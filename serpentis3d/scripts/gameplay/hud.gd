@@ -18,6 +18,9 @@ var rank_label: Label
 var timer_label: Label
 var kills_label: Label
 var boost_bar: ProgressBar
+var ability_bar: ProgressBar
+var ab_label: Label
+var _ability_panel: PanelContainer
 var announce_label: Label
 var announce_sub: Label
 var feed_box: VBoxContainer
@@ -126,6 +129,32 @@ func _build_gameplay() -> void:
 	bv.add_child(boost_bar)
 	gameplay_group.add_child(boost_panel)
 
+	# ability bar (Magnet Pulse / Shield) — hidden unless an ability is active
+	var ab_panel := PanelContainer.new()
+	ab_panel.add_theme_stylebox_override("panel", _panel_style())
+	ab_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	ab_panel.offset_left = 18
+	ab_panel.offset_top = -130
+	ab_panel.offset_bottom = -78
+	var av2 := VBoxContainer.new()
+	ab_panel.add_child(av2)
+	ab_label = _mk_label("MAGNET PULSE", 13, COL_WARN, av2)
+	ability_bar = ProgressBar.new()
+	ability_bar.min_value = 0
+	ability_bar.max_value = 1.0
+	ability_bar.value = 1.0
+	ability_bar.custom_minimum_size = Vector2(240, 10)
+	ability_bar.show_percentage = false
+	ability_bar.add_theme_stylebox_override("background", _bar_bg())
+	var afill := StyleBoxFlat.new()
+	afill.bg_color = COL_WARN
+	afill.set_corner_radius_all(4)
+	ability_bar.add_theme_stylebox_override("fill", afill)
+	av2.add_child(ability_bar)
+	gameplay_group.add_child(ab_panel)
+	ab_panel.visible = false
+	_ability_panel = ab_panel
+
 	# center announce
 	var av := VBoxContainer.new()
 	av.set_anchors_preset(Control.PRESET_CENTER)
@@ -159,6 +188,15 @@ func set_kills(k: int) -> void:
 
 func set_boost(v: float) -> void:
 	boost_bar.value = clampf(v, 0, 1)
+
+func set_ability(id: String, frac: float) -> void:
+	if _ability_panel == null:
+		return
+	var on := id != "" and frac > 0.0
+	_ability_panel.visible = on
+	if on:
+		ab_label.text = id
+		ability_bar.value = clampf(frac, 0, 1)
 
 func set_boosting(on: bool) -> void:
 	var fill := boost_bar.get_theme_stylebox("fill")
