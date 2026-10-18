@@ -72,6 +72,16 @@ func _autopilot_steer() -> void:
 		var radial := head_pos.length()
 		if radial > R - 7.5:
 			desired += (-head_pos).normalized() * (1.0 + clampf((radial - (R - 7.5)) / 6.0, 0.0, 1.0) * 2.4)
+		# boulders are real cover now — steer around them
+		var probe := head_pos + Vector3(sin(heading), 0.0, cos(heading)) * (speed_cur * 1.2 + 2.5)
+		for ob in match_world.obstacles:
+			var d: Vector3 = probe - (ob["pos"] as Vector3)
+			d.y = 0.0
+			var rr: float = float(ob["r"]) + 2.2
+			if d.length_squared() < rr * rr:
+				if d.length_squared() < 0.02:
+					d = probe * -1.0
+				desired += d.normalized() * (1.2 + (rr - d.length()) * 0.55)
 		if desired.length_squared() < 0.01:
 			var fwd := Vector3(sin(heading), 0.0, cos(heading))
 			desired = fwd.rotated(Vector3.UP, 0.1)

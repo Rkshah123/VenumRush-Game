@@ -13,6 +13,10 @@ const PERSONALITIES := {
 	"speedy":   {"n": "Racer",    "aggr": 0.5,  "caution": 0.35, "range": 24.0, "boost_use": 0.85, "colors": [Color(0.55, 0.1, 0.65), Color(1.0, 0.3, 0.8)]},
 	"territor": {"n": "Guardian", "aggr": 0.6,  "caution": 0.45, "range": 20.0, "boost_use": 0.2,  "colors": [Color(0.1, 0.35, 0.3), Color(0.2, 1.0, 0.85)]},
 	"elite":    {"n": "Phantom",  "aggr": 0.8,  "caution": 0.5,  "range": 28.0, "boost_use": 0.5,  "colors": [Color(0.06, 0.08, 0.14), Color(0.7, 0.85, 1.0)]},
+	"python":   {"n": "Python",   "aggr": 0.35, "caution": 0.7,  "range": 32.0, "boost_use": 0.12, "colors": [Color(0.13, 0.28, 0.12), Color(0.55, 0.75, 0.35)]},
+	"viper":    {"n": "Viper",    "aggr": 0.7,  "caution": 0.3,  "range": 26.0, "boost_use": 0.75, "colors": [Color(0.5, 0.08, 0.3), Color(0.95, 0.5, 0.9)]},
+	"mamba":    {"n": "Mamba",    "aggr": 0.9,  "caution": 0.35, "range": 30.0, "boost_use": 0.85, "colors": [Color(0.05, 0.3, 0.15), Color(0.4, 1.0, 0.6)]},
+	"sidewinder": {"n": "Sidewinder", "aggr": 0.45, "caution": 0.4, "range": 24.0, "boost_use": 0.5, "colors": [Color(0.55, 0.4, 0.15), Color(0.95, 0.8, 0.5)]},
 }
 
 var preset := "scav"
@@ -33,6 +37,7 @@ var _prey_d := INF
 var _pred_d := INF
 var _food_pos := Vector3.INF
 var _frame_counter := 0.0
+var _weave_t := 0.0
 
 func configure(personality: String, world) -> void:
 	preset = personality
@@ -102,6 +107,14 @@ func _steer(delta: float) -> void:
 		back.y = 0.0
 		if back.length() > 18.0:
 			want += back.normalized() * 0.9
+
+	# sidewinder signature: a steady slithering weave across the heading
+	if preset == "sidewinder":
+		_weave_t += delta * 2.3
+		var right := Vector3(cos(heading), 0.0, -sin(heading))
+		want += right * sin(_weave_t) * 0.85
+	elif _weave_t != 0.0:
+		_weave_t = 0.0
 
 	# --- wall avoidance: steer inside before it becomes fatal ---
 	var to_center := -head_pos

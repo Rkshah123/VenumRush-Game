@@ -5,6 +5,7 @@ extends CanvasLayer
 
 signal play_pressed
 signal quit_pressed
+signal arena_shift(dir: int)
 
 var root: Control
 var gameplay_group: Control
@@ -24,6 +25,7 @@ var _pop_layer: Control
 
 var _menu_main: VBoxContainer
 var _menu_settings: VBoxContainer
+var _arena_label: Label
 var _pause_panel: PanelContainer
 var _over_panel: PanelContainer
 var _over_title: Label
@@ -251,6 +253,23 @@ func _build_menu() -> void:
 	_menu_main = VBoxContainer.new()
 	_menu_main.add_theme_constant_override("separation", 10)
 	vroot.add_child(_menu_main)
+	# ARENA selector — live-swaps the 3D world behind the menu
+	var arena_tag := _mk_label("ARENA", 12, COL_DIM, _menu_main)
+	arena_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var arow := HBoxContainer.new()
+	arow.alignment = BoxContainer.ALIGNMENT_CENTER
+	arow.add_theme_constant_override("separation", 6)
+	_menu_main.add_child(arow)
+	var prev_b := _nav_button("◄")
+	prev_b.pressed.connect(func(): arena_shift.emit(-1))
+	arow.add_child(prev_b)
+	_arena_label = _mk_label("VERDANT VALLEY", 15, COL_ACCENT, arow)
+	_arena_label.custom_minimum_size = Vector2(196, 40)
+	_arena_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_arena_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	var next_b := _nav_button("►")
+	next_b.pressed.connect(func(): arena_shift.emit(1))
+	arow.add_child(next_b)
 	_menu_button(_menu_main, "PLAY", func(): play_pressed.emit())
 	_menu_button(_menu_main, "SETTINGS", func(): _swap_menu(false))
 	_menu_button(_menu_main, "QUIT", func(): quit_pressed.emit())
@@ -290,6 +309,11 @@ func _swap_menu(show_main: bool) -> void:
 	_menu_main.visible = show_main
 	_menu_settings.visible = not show_main
 	AudioMgr.play("click")
+
+func set_arena(key: String) -> void:
+	if _arena_label == null:
+		return
+	_arena_label.text = str(ArenaPresets.get_preset(key).get("name", "VALLEY"))
 
 func show_menu(v: bool) -> void:
 	menu_group.visible = v
@@ -380,6 +404,17 @@ func _mk_label(text: String, size: int, color: Color, parent: Node = null) -> La
 	if parent:
 		parent.add_child(l)
 	return l
+
+func _nav_button(text: String) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(44, 40)
+	_style_button(b)
+	b.add_theme_font_size_override("font_size", 20)
+	b.add_theme_color_override("font_color", COL_TEXT)
+	b.add_theme_color_override("font_hover_color", COL_ACCENT)
+	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	return b
 
 func _menu_button(parent: Node, text: String, on_press: Callable) -> Button:
 	var b := Button.new()

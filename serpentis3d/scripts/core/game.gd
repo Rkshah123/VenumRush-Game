@@ -8,6 +8,7 @@ var hud: GameHud
 var match_world: MatchWorld
 var cam: Camera3D
 var state := State.MENU
+var _arena_key := "valley"
 var _cam_angle := 0.0
 var _cam_pos := Vector3(0, 18, 38)
 var _cam_look := Vector3.ZERO
@@ -23,35 +24,16 @@ var _no_death_dev := false
 var _solo_dev := false
 var _skip_hud_dev := false
 var _onscreen_test := false
+var _arena_test := false
 var _diag_t := 0.0
 
 func _ready() -> void:
 	randomize()
-	hud = GameHud.new()
-	add_child(hud)
-	match_world = MatchWorld.new()
-	match_world.hud = hud
-	add_child(match_world)
-	match_world.match_event.connect(hud.push_feed)
-	match_world.player_died.connect(_on_player_died)
-
-	cam = Camera3D.new()
-	cam.fov = 55.0
-	cam.current = true
-	add_child(cam)
-	cam.position = _cam_pos
-	cam.look_at_from_position(_cam_pos, Vector3.ZERO, Vector3.UP)
-
-	hud.play_pressed.connect(func(): _start_play())
-	hud.quit_pressed.connect(func(): _quit_nicely())
-	hud.resume_pressed.connect(func(): _resume())
-	hud.restart_pressed.connect(func(): _restart())
-	hud.tomenu_pressed.connect(func(): _to_menu())
-
-	# dev args: `godot --path proj -- --autoplay --shot=8 --quit=9`
+	# dev args FIRST so biome overrides land before the world builds
 	var args := _collect_dev_args()
 	if "--autoplay" in args:
 		_autoplay = true
+	var arena_dev := ""
 	for a in args:
 		if a.begins_with("--shot="):
 			_autoplay = true
@@ -73,6 +55,40 @@ func _ready() -> void:
 			_skip_hud_dev = true
 		if a == "--onscreen-test":
 			_onscreen_test = true
+		if a.begins_with("--arena="):
+			arena_dev = a.substr(8)
+		if a == "--arena-test":
+			_autoplay = true
+			_arena_test = true
+	_arena_key = str(SaveMgr.get_value("arena", "valley"))
+	if arena_dev != "" and ArenaPresets.ALL.has(arena_dev):
+		_arena_key = arena_dev
+	elif not ArenaPresets.ALL.has(_arena_key):
+		_arena_key = "valley"
+	hud = GameHud.new()
+	add_child(hud)
+	match_world = MatchWorld.new()
+	match_world.hud = hud
+	match_world.arena_key = _arena_key
+	add_child(match_world)
+	match_world.match_event.connect(hud.push_feed)
+	match_world.player_died.connect(_on_player_died)
+	hud.set_arena(_arena_key)
+	hud.arena_shift.connect(_on_arena_shift)
+
+	cam = Camera3D.new()
+	cam.fov = 55.0
+	cam.current = true
+	add_child(cam)
+	cam.position = _cam_pos
+	cam.look_at_from_position(_cam_pos, Vector3.ZERO, Vector3.UP)
+
+	hud.play_pressed.connect(func(): _start_play())
+	hud.quit_pressed.connect(func(): _quit_nicely())
+	hud.resume_pressed.connect(func(): _resume())
+	hud.restart_pressed.connect(func(): _restart())
+	hud.tomenu_pressed.connect(func(): _to_menu())
+
 	if _autoplay:
 		# Automated checks must never disturb the player: mute all audio for
 		# this session only (saved volume settings are untouched) and push the
@@ -90,11 +106,18 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--arena-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
 			keep = true
+			if src == "--shot-menu":
+				_shot_menu = true
+		elif src.begins_with("--arena="):
+			keep = true
+			var k := src.substr(8)
+			if ArenaPresets.ALL.has(k):
+				_arena_key = k
 		elif src == "--closeup" or src.begins_with("--closeup="):
 			keep = true
 		elif src.begins_with("--shot="):
@@ -109,6 +132,16 @@ func _collect_dev_args() -> Array[String]:
 func _dev_sequence() -> void:
 	# menu breathing room, then a real match, optional screenshot & quit
 	await get_tree().create_timer(1.0).timeout
+	if _arena_test:
+		# exercises the same signal the ◄ ► buttons emit: cycle 3 times with
+		# a shot each, verifying world rebuilds + save persistence
+		for i in 3:
+			hud.arena_shift.emit(1)
+			await get_tree().create_timer(2.2).timeout
+			await _snap("shot_arena%d.png" % (i + 1))
+			print("ARENA-TEST now=", _arena_key, " saved=", SaveMgr.get_value("arena"))
+		_quit_nicely()
+		return
 	if _shot_menu:
 		await _snap("shot_menu.png")
 	await get_tree().create_timer(0.6).timeout
@@ -165,6 +198,28 @@ func _start_play() -> void:
 
 func _restart() -> void:
 	_start_play()
+
+func _on_arena_shift(dir: int) -> void:
+	# only meaningful in the menu; swaps the live demo backdrop
+	if state != State.MENU:
+		return
+	var nk := ArenaPresets.next_key(_arena_key) if dir >= 0 else ArenaPresets.prev_key(_arena_key)
+	_arena_key = nk
+	SaveMgr.set_value("arena", nk)
+	SaveMgr.save()
+	hud.set_arena(nk)
+	_rebuild_world()
+	match_world.start_demo()
+
+func _rebuild_world() -> void:
+	if is_instance_valid(match_world):
+		match_world.queue_free()
+	match_world = MatchWorld.new()
+	match_world.hud = hud
+	match_world.arena_key = _arena_key
+	add_child(match_world)
+	match_world.match_event.connect(hud.push_feed)
+	match_world.player_died.connect(_on_player_died)
 
 func _to_menu() -> void:
 	state = State.MENU

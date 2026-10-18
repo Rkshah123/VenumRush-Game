@@ -7,11 +7,12 @@ signal match_event(kind: String, text: String)
 signal player_died
 
 const ARENA_R := 55.0
-const AI_TARGET := 7
-const PERSONALITY_POOL := ["hunter", "scav", "survivor", "speedy", "territor", "elite"]
+const AI_TARGET := 10
+const PERSONALITY_POOL := ["hunter", "scav", "survivor", "speedy", "territor", "elite", "python", "viper", "mamba", "sidewinder"]
 const BOSS_LENGTH := 34.0
 
 var arena_radius := ARENA_R
+var arena_key := "valley"
 var obstacles: Array = []
 var snakes: Array = []
 var player: Snake = null
@@ -28,6 +29,7 @@ var solo_dev := false
 var skip_hud_dev := false
 var verbose := false
 var boss_scheduled := false
+var _worst_dt := 0.0
 
 var _next_id := 1
 var _respawn_queue: Array = []
@@ -43,6 +45,7 @@ var _pers_cycle := 0
 
 func _ready() -> void:
 	arena = ArenaBuilder.new()
+	arena.arena_key = arena_key
 	add_child(arena)
 	obstacles = arena.obstacles
 	food = FoodSpawner.new()
@@ -150,9 +153,12 @@ func _physics_process(delta: float) -> void:
 		return
 	match_time += delta
 	_hb += delta
+	if delta > _worst_dt:
+		_worst_dt = delta
 	if _hb > 5.0 and verbose:
 		_hb = 0.0
-		print("HB t=%.1f snakes=%d orbs=%d" % [match_time, snake_count(), food._orbs.size()])
+		print("HB t=%.1f snakes=%d orbs=%d fps=%d worst_dt=%.0fms" % [match_time, snake_count(), food.count_alive(), Engine.get_frames_per_second(), _worst_dt * 1000.0])
+		_worst_dt = 0.0
 
 	# boss appears in real matches after 60 s
 	if not demo_mode and not boss_scheduled and match_time > 60.0 and snake_count() > 2:
@@ -332,27 +338,21 @@ func _on_died(s: Snake, killer_name: String) -> void:
 # ------------------------------------------------------------------ food
 
 func _eat_checks() -> void:
-	var orbs: Array = food._orbs.duplicate()
 	for s in snakes:
 		if not is_instance_valid(s) or not s.alive:
 			continue
 		var reach: float = s.head_radius() + 0.55
-		for i in range(orbs.size() - 1, -1, -1):
-			var o: Dictionary = orbs[i]
-			var idx := food._orbs.find(o)
-			if idx < 0:
-				continue
-			var op: Vector3 = o["pos"] + Vector3.UP * 0.55
-			if s.head_pos.distance_to(op) < reach + float(o["kind"]) * 0.03 + FoodSpawner.KIND_RADIUS[int(o["kind"])] * 0.5:
-				if s.is_player:
-					AudioMgr.play("eat" if int(o["kind"]) == 0 else ("eat_rare" if int(o["kind"]) == 1 else "eat_gold"))
-					var sv := int(FoodSpawner.KIND_SCORE[int(o["kind"])])
-					match_event.emit("eat", "+%d" % sv)
-					if hud != null and is_instance_valid(hud):
-						hud.push_score_popup("+%d" % sv, GameHud.COL_GOLD if int(o["kind"]) == 2 else GameHud.COL_ACCENT)
-				s.eat(int(o["kind"]), FoodSpawner.KIND_GROWTH[int(o["kind"])], FoodSpawner.KIND_SCORE[int(o["kind"])])
-				food.remove_orb_by_index(idx)
-				orbs.remove_at(i)
+		var hits: Array = food.eat_hits(s.head_pos, reach)
+		for h in hits:
+			var k := int(h["kind"])
+			if s.is_player:
+				AudioMgr.play("eat" if k == 0 else ("eat_rare" if k == 1 else "eat_gold"))
+				var sv := int(FoodSpawner.KIND_SCORE[k])
+				match_event.emit("eat", "+%d" % sv)
+				if hud != null and is_instance_valid(hud):
+					hud.push_score_popup("+%d" % sv, GameHud.COL_GOLD if k == 2 else GameHud.COL_ACCENT)
+			s.eat(k, FoodSpawner.KIND_GROWTH[k], FoodSpawner.KIND_SCORE[k])
+			food.remove_orb_at_pos(k, h["pos"])
 
 # ------------------------------------------------------------------ HUD feed
 
