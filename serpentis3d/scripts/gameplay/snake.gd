@@ -284,6 +284,8 @@ func eat(kind: int, growth: float, score_value: int) -> void:
 	score += score_value
 	target_length = minf(max_length, target_length + growth)
 	_mouth_open = 1.0
+	# Chaining orbs rewards a small boost refill — organic pacing incentive.
+	boost_meter = minf(BOOST_MAX, boost_meter + 0.6)
 	ate.emit(self, kind, score_value)
 
 func die(killer_name: String = "") -> void:

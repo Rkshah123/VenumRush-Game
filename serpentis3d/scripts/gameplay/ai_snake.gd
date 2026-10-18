@@ -141,6 +141,7 @@ func _steer(delta: float) -> void:
 	var wants_speed: bool = \
 		(mode == Mode.CHASE and aggression > 0.6 and _prey_d < 14.0) or \
 		(mode == Mode.FLEE and _pred_d < 9.0 and caution > 0.25) or \
+		(mode == Mode.SEEK and _food_pos != Vector3.INF and head_pos.distance_to(_food_pos) < 9.0 and radial < R - 12.0) or \
 		radial > R - 4.5
 	if wants_speed and boost_meter > Snake.BOOST_MAX * 0.45 and randf() < boost_use * delta * 8.0:
 		input_boost = true

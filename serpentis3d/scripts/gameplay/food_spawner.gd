@@ -8,6 +8,7 @@ const KIND_GROWTH := [0.5, 0.95, 1.4]
 const KIND_SCORE := [10, 30, 75]
 const KIND_COLORS := [Color(0.2, 0.95, 0.75), Color(0.75, 0.35, 1.0), Color(1.0, 0.82, 0.28)]
 const KIND_RADIUS := [0.3, 0.34, 0.4]
+const HARD_CAP := 240   # absolute node budget — death drops respect this cap
 
 var arena_radius := 55.0
 var obstacles: Array = []
@@ -47,6 +48,13 @@ func reset() -> void:
 	for kind in 3:
 		for i in KIND_TARGETS[kind]:
 			_spawn_orb(kind)
+
+func drop_orb(kind: int, pos: Vector3) -> void:
+	# Death-drop path: conversion of a fallen snake's mass, capped to keep the
+	# node count (and GPU load) bounded on low-end hardware.
+	if _orbs.size() >= HARD_CAP:
+		return
+	_spawn_orb(kind, pos)
 
 func _spawn_orb(kind: int, at: Vector3 = Vector3.INF) -> void:
 	var r: float = KIND_RADIUS[kind]

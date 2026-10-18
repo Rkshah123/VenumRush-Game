@@ -20,6 +20,7 @@ var boost_bar: ProgressBar
 var announce_label: Label
 var announce_sub: Label
 var feed_box: VBoxContainer
+var _pop_layer: Control
 
 var _menu_main: VBoxContainer
 var _menu_settings: VBoxContainer
@@ -57,6 +58,12 @@ func _build_gameplay() -> void:
 	gameplay_group.set_anchors_preset(Control.PRESET_FULL_RECT)
 	gameplay_group.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(gameplay_group)
+
+	# full-screen layer for floating score popups
+	_pop_layer = Control.new()
+	_pop_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_pop_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	gameplay_group.add_child(_pop_layer)
 
 	var top := PanelContainer.new()
 	top.add_theme_stylebox_override("panel", _panel_style())
@@ -182,6 +189,20 @@ func push_feed(kind: String, text: String) -> void:
 	tw.tween_interval(3.6)
 	tw.tween_property(lab, "modulate:a", 0.0, 0.7)
 	tw.tween_callback(lab.queue_free)
+
+func push_score_popup(text: String, color: Color = COL_ACCENT) -> void:
+	# Floating "+N" that rises from lower-center and fades — eaten value feedback.
+	if _pop_layer == null:
+		return
+	var lab := _mk_label(text, 24, color, _pop_layer)
+	lab.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var vs := _pop_layer.get_viewport_rect().size
+	lab.position = Vector2(vs.x * 0.5 - 60.0 + randf_range(-30.0, 30.0), vs.y * 0.64)
+	var tw := lab.create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(lab, "position:y", lab.position.y - 52.0, 0.85).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_QUAD)
+	tw.tween_property(lab, "modulate:a", 0.0, 0.85).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
+	tw.chain().tween_callback(lab.queue_free)
 
 func announce(title: String, sub: String = "") -> void:
 	if announce_label == null:

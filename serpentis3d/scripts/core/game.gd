@@ -19,6 +19,10 @@ var _closeup := false
 var _shot_menu := false
 var _shot_game := false
 var _quit_at := -1.0
+var _no_death_dev := false
+var _solo_dev := false
+var _skip_hud_dev := false
+var _onscreen_test := false
 var _diag_t := 0.0
 
 func _ready() -> void:
@@ -58,12 +62,27 @@ func _ready() -> void:
 		if a == "--closeup" or a.begins_with("--closeup="):
 			_autoplay = true
 			_closeup = true
+		if a == "--no-death":
+			_autoplay = true
+			_no_death_dev = true
+		if a == "--solo":
+			_autoplay = true
+			_solo_dev = true
+		if a == "--hud-off":
+			_autoplay = true
+			_skip_hud_dev = true
+		if a == "--onscreen-test":
+			_onscreen_test = true
 	if _autoplay:
 		# Automated checks must never disturb the player: mute all audio for
 		# this session only (saved volume settings are untouched) and push the
-		# window far off-screen so it doesn't pop up over their work.
+		# window far off-screen so it doesn't pop up over their work. Vsync is
+		# disabled because fully off-screen windows can have their swap-chain
+		# stalled by the compositor, which would freeze the whole game loop.
 		AudioServer.set_bus_mute(0, true)
-		DisplayServer.window_set_position(Vector2i(-3200, -3200))
+		if not _onscreen_test:
+			DisplayServer.window_set_position(Vector2i(-3200, -3200))
+			DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 		_dev_sequence()
 
 	get_tree().set_auto_accept_quit(true)
@@ -71,11 +90,19 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	for src in [OS.get_cmdline_user_args(), OS.get_cmdline_args()]:
-		for a in src:
-			if a == "--autoplay" or a.begins_with("--shot=") or a.begins_with("--quit") or a == "--closeup" or a.begins_with("--closeup="):
-				if not out.has(a):
-					out.append(a)
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test"]
+	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
+		var keep := false
+		if allow.has(src):
+			keep = true
+		elif src == "--closeup" or src.begins_with("--closeup="):
+			keep = true
+		elif src.begins_with("--shot="):
+			keep = true
+		elif src.begins_with("--quit") and src.find("=") > 0:
+			keep = true
+		if keep and not out.has(src):
+			out.append(src)
 	print("DEVARGS: ", out)
 	return out
 
@@ -89,8 +116,10 @@ func _dev_sequence() -> void:
 	print("DEV: play started")
 	if _quit_at > 0.0:
 		await get_tree().create_timer(_quit_at * 0.5).timeout
+		print("DEV: mid timer fired")
 		await _snap("shot_mid.png")
 		await get_tree().create_timer(_quit_at * 0.5).timeout
+		print("DEV: end timer fired")
 		if _shot_game:
 			await _snap("shot_game.png")
 		_quit_nicely()
@@ -104,7 +133,9 @@ func _snap(fname: String) -> void:
 		await get_tree().process_frame
 		if done:
 			break
+	print("DEV: snap waited frames")
 	var img := get_viewport().get_texture().get_image()
+	print("DEV: snap image ", img.get_width(), "x", img.get_height())
 	img.save_png("user://" + fname)
 	print("DEVSHOT ", fname)
 
@@ -118,7 +149,14 @@ func _start_play() -> void:
 	hud.set_gameplay_visible(true)
 	get_tree().paused = false
 	Engine.time_scale = 1.0
+	# dev flags must be applied BEFORE the match spawns anything
+	match_world.no_death = _no_death_dev or _closeup
+	match_world.solo_dev = _solo_dev
+	match_world.skip_hud_dev = _skip_hud_dev
+	match_world.verbose = _autoplay
 	match_world.start_match()
+	if _autoplay and match_world.player != null:
+		match_world.player.autopilot = true
 	AudioMgr.play("spawn")
 	hud.announce("SURVIVE", "COLLECT ORBS — GROW — ELIMINATE RIVALS")
 	if _closeup and match_world.player != null:
@@ -139,6 +177,8 @@ func _to_menu() -> void:
 	match_world.start_demo()
 
 func _on_player_died() -> void:
+	if _autoplay:
+		print("DEV: player died — ", match_world.last_kill_text)
 	state = State.OVER
 	# capture stats immediately (player node is freed right after this signal)
 	var stats := {
@@ -167,7 +207,14 @@ func player_length() -> float:
 func player_kills() -> int:
 	return match_world.player.kills
 func player_rank() -> int:
-	return match_world.rank_of_live(match_world.player) if player_alive() else 99
+	if not player_alive():
+		# already eliminated — place by score against the survivors
+		var r := 1
+		for s in match_world.get_alive_snakes():
+			if s.score > player_score():
+				r += 1
+		return r
+	return match_world.rank_of_live(match_world.player)
 func player_alive() -> bool:
 	return match_world.player != null and is_instance_valid(match_world.player) and match_world.player.alive
 
@@ -256,15 +303,18 @@ func _chase_camera(delta: float) -> void:
 	var head := p.head_pos
 	_player_last_head = head
 	var fwd := Vector3(sin(p.heading), 0.0, cos(p.heading))
+	# boost speed-kick: FOV widens and the camera looks further ahead while boosting
+	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * (Snake.BOOST_MULT - 1.0)), 0.0, 1.0)
 	var len_extra := clampf(p.length * 0.045, 0.0, 2.6)
 	var dist := 8.5 + len_extra + (1.4 if p.boost_active else 0.0)
 	var height := 4.4 + len_extra * 0.7
 	var desired := head - fwd * dist + Vector3.UP * height
 	_cam_pos = _cam_pos.lerp(desired, 1.0 - exp(-5.5 * delta))
-	var look_target := head + fwd * 4.2 + Vector3.UP * 1.0
+	var look_target := head + fwd * (4.2 + boost_k * 2.4) + Vector3.UP * 1.0
 	_cam_look = _cam_look.lerp(look_target, 1.0 - exp(-7.0 * delta))
 	cam.global_position = _cam_pos
 	cam.look_at(_cam_look, Vector3.UP)
+	cam.fov = lerpf(cam.fov, 70.0 + boost_k * 10.0, 1.0 - exp(-6.0 * delta))
 
 # ---------------------------------------------------------------- app defaults
 

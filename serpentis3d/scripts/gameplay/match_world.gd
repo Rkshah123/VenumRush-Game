@@ -19,9 +19,14 @@ var food: FoodSpawner
 var arena: ArenaBuilder
 var hud = null
 var match_time := 0.0
+var _hb := 0.0
+var last_kill_text := ""
 var running := false
 var demo_mode := false
 var no_death := false
+var solo_dev := false
+var skip_hud_dev := false
+var verbose := false
 var boss_scheduled := false
 
 var _next_id := 1
@@ -56,8 +61,9 @@ func start_match() -> void:
 	_attach(p, true, 7.0)
 	player = p
 	match_event.emit("info", "STEER WITH THE POINTER — HOLD LMB/SPACE TO BOOST")
-	# AI roster
-	for i in AI_TARGET:
+	# AI roster (skippable in dev-solo runs)
+	var ai_target: int = AI_TARGET if not solo_dev else 0
+	for i in ai_target:
 		_spawn_ai()
 	# Boss appears mid-match
 	boss_scheduled = false
@@ -110,6 +116,18 @@ func _attach(s: Snake, is_player: bool, start_len: float) -> void:
 	var ang := randf() * TAU
 	var rad := arena_radius * randf_range(0.35, 0.72)
 	var pos := Vector3(sin(ang) * rad, 0.0, cos(ang) * rad)
+	# spawn separation: never materialize inside an existing snake's neighborhood
+	for attempt in 12:
+		ang = randf() * TAU
+		rad = arena_radius * randf_range(0.35, 0.72)
+		pos = Vector3(sin(ang) * rad, 0.0, cos(ang) * rad)
+		var clear := true
+		for o in snakes:
+			if is_instance_valid(o) and o.alive and o.head_pos.distance_to(pos) < 12.0:
+				clear = false
+				break
+		if clear:
+			break
 	var tape := ang + PI * 0.5 + randf_range(-0.4, 0.4)
 	var dir := Vector3(sin(tape), 0.0, cos(tape))
 	add_child(s)
@@ -131,6 +149,10 @@ func _physics_process(delta: float) -> void:
 	if not running:
 		return
 	match_time += delta
+	_hb += delta
+	if _hb > 5.0 and verbose:
+		_hb = 0.0
+		print("HB t=%.1f snakes=%d orbs=%d" % [match_time, snake_count(), food._orbs.size()])
 
 	# boss appears in real matches after 60 s
 	if not demo_mode and not boss_scheduled and match_time > 60.0 and snake_count() > 2:
@@ -157,7 +179,8 @@ func _physics_process(delta: float) -> void:
 
 	if not demo_mode and player != null and is_instance_valid(player) and player.alive:
 		_update_hud()
-		_check_milestones()
+		if not skip_hud_dev:
+			_check_milestones()
 
 func snake_count() -> int:
 	var c := 0
@@ -269,13 +292,16 @@ func _head_collisions() -> void:
 func _kill(victim: Snake, killer, cause_name: String) -> void:
 	if not victim.alive:
 		return
+	var cause := cause_name
 	if killer != null and is_instance_valid(killer):
 		killer.kills += 1
 		killer.score += int(30.0 + victim.length * 1.2)
+		cause = killer.display_name
 		match_event.emit("kill", "%s was cut down by %s" % [victim.display_name, killer.display_name])
 	else:
 		match_event.emit("kill", "%s crashed into %s" % [victim.display_name, cause_name])
-	victim.die(cause_name if killer == null or not is_instance_valid(killer) else killer.display_name)
+	last_kill_text = "%s <- %s (pos=%.1v rad=%.0f)" % [victim.display_name, cause, victim.head_pos, victim.head_pos.length()]
+	victim.die(cause if killer == null or not is_instance_valid(killer) else killer.display_name)
 
 func _on_died(s: Snake, killer_name: String) -> void:
 	# drop mass into collectible orbs (bounded)
@@ -290,7 +316,7 @@ func _on_died(s: Snake, killer_name: String) -> void:
 		elif count % 6 == 3:
 			kind = 1
 		var jit := Vector3(randf_range(-0.5, 0.5), 0, randf_range(-0.5, 0.5))
-		food._spawn_orb(kind, s.coll_pos[i] + jit)
+		food.drop_orb(kind, s.coll_pos[i] + jit)
 		count += 1
 
 	if s.is_player:
@@ -320,7 +346,10 @@ func _eat_checks() -> void:
 			if s.head_pos.distance_to(op) < reach + float(o["kind"]) * 0.03 + FoodSpawner.KIND_RADIUS[int(o["kind"])] * 0.5:
 				if s.is_player:
 					AudioMgr.play("eat" if int(o["kind"]) == 0 else ("eat_rare" if int(o["kind"]) == 1 else "eat_gold"))
-					match_event.emit("eat", "+%d" % FoodSpawner.KIND_SCORE[int(o["kind"])])
+					var sv := int(FoodSpawner.KIND_SCORE[int(o["kind"])])
+					match_event.emit("eat", "+%d" % sv)
+					if hud != null and is_instance_valid(hud):
+						hud.push_score_popup("+%d" % sv, GameHud.COL_GOLD if int(o["kind"]) == 2 else GameHud.COL_ACCENT)
 				s.eat(int(o["kind"]), FoodSpawner.KIND_GROWTH[int(o["kind"])], FoodSpawner.KIND_SCORE[int(o["kind"])])
 				food.remove_orb_by_index(idx)
 				orbs.remove_at(i)
@@ -329,6 +358,8 @@ func _eat_checks() -> void:
 
 func _update_hud() -> void:
 	if hud == null or not is_instance_valid(hud):
+		return
+	if skip_hud_dev:
 		return
 	var alive := get_alive_snakes()
 	alive.sort_custom(func(a, b): return a.score > b.score)
