@@ -25,6 +25,7 @@ var _shot_menu := false
 var _shot_skins := false
 var _shot_settings := false
 var _theme_test := false
+var _uix_test := false
 var _shot_game := false
 var _quit_at := -1.0
 var _no_death_dev := false
@@ -90,6 +91,9 @@ func _ready() -> void:
 		if a == "--theme-test":
 			_autoplay = true
 			_theme_test = true
+		if a == "--uix-test":
+			_autoplay = true
+			_uix_test = true
 	_arena_key = str(SaveMgr.get_value("arena", "valley"))
 	if arena_dev != "" and ArenaPresets.ALL.has(arena_dev):
 		_arena_key = arena_dev
@@ -125,7 +129,9 @@ func _ready() -> void:
 	get_viewport().size_changed.connect(func(): _topdown_dirty = true)
 
 	hud.play_pressed.connect(func(): _start_play())
-	hud.quit_pressed.connect(func(): _quit_nicely())
+	hud.quit_pressed.connect(func(): hud.show_quit_confirm(true))
+	hud.quit_confirmed.connect(_quit_nicely)
+	hud.pause_pressed.connect(_toggle_pause)
 	hud.resume_pressed.connect(func(): _resume())
 	hud.restart_pressed.connect(func(): _restart())
 	hud.tomenu_pressed.connect(func(): _to_menu())
@@ -147,7 +153,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test", "--uix-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -227,6 +233,9 @@ func _dev_sequence() -> void:
 	await get_tree().create_timer(0.6).timeout
 	_start_play()
 	print("DEV: play started")
+	if _uix_test:
+		await _uix_test_run()
+		return
 	if _touch_test:
 		await _touch_test_run()
 		return
@@ -343,6 +352,32 @@ func _skins_test_run() -> void:
 	print("SKINTEST restored now=%d" % int(SaveMgr.get_value("skin", 0)))
 	_quit_nicely()
 
+# ---------------------------------------------------------------- UI QA
+
+func _uix_test_run() -> void:
+	# pause button / resume / quit-confirm behavior through the real signal
+	# paths (spec sections 3 and 6)
+	await get_tree().create_timer(2.0).timeout
+	match_world.no_death = true
+	print("UIXTEST playing=%s btn=%s" % [str(state == State.PLAYING), hud._pause_btn.text])
+	_pause()
+	await get_tree().process_frame
+	var paused_ok := state == State.PAUSED and get_tree().paused and hud._pause_btn.text == "▶"
+	print("UIXTEST paused %s (tree.paused=%s glyph=%s)" % ["PASS" if paused_ok else "FAIL", str(get_tree().paused), hud._pause_btn.text])
+	await _snap("shot_pause.png")
+	_resume()
+	await get_tree().process_frame
+	print("UIXTEST resumed %s (time=%.1f)" % ["PASS" if state == State.PLAYING and not get_tree().paused else "FAIL", match_world.match_time])
+	hud.show_quit_confirm(true)
+	await get_tree().process_frame
+	var quit_ok := hud._quit_panel.visible and hud.overlay_group.visible
+	print("UIXTEST quit-dialog %s" % ["PASS" if quit_ok else "FAIL"])
+	await _snap("shot_quit.png")
+	hud.show_quit_confirm(false)
+	await get_tree().process_frame
+	print("UIXTEST quit-cancel %s" % ["PASS" if not hud._quit_panel.visible else "FAIL"])
+	_quit_nicely()
+
 # ---------------------------------------------------------------- theme QA
 
 func _theme_test_run() -> void:
@@ -424,6 +459,7 @@ func _start_play() -> void:
 	hud.show_menu(false)
 	hud.show_pause(false)
 	hud.show_gameover_hidden()
+	hud.set_paused(false)
 	hud.set_gameplay_visible(true)
 	get_tree().paused = false
 	Engine.time_scale = 1.0
@@ -519,6 +555,8 @@ func _on_player_died() -> void:
 	if _autoplay:
 		print("DEV: player died — ", match_world.last_kill_text)
 	state = State.OVER
+	hud.set_paused(false)
+	hud.set_gameplay_visible(false)
 	# capture stats immediately (player node is freed right after this signal)
 	var stats := {
 		"score": player_score(),
@@ -567,11 +605,25 @@ func _pause() -> void:
 	state = State.PAUSED
 	get_tree().paused = true
 	hud.show_pause(true)
+	hud.set_paused(true)
 
 func _resume() -> void:
+	if state != State.PAUSED:
+		return
 	state = State.PLAYING
 	get_tree().paused = false
 	hud.show_pause(false)
+	hud.set_paused(false)
+
+func _toggle_pause() -> void:
+	# HUD play/pause button (spec §3)
+	match state:
+		State.PLAYING:
+			_pause()
+		State.PAUSED:
+			_resume()
+		_:
+			pass
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -608,10 +660,13 @@ func _physics_process(delta: float) -> void:
 	match state:
 		State.MENU:
 			if match_world.running and match_world.get_alive_snakes().size() > 0:
-				# cinematic menu orbit around arena action
+				# cinematic menu orbit around arena action (steeper in 2D mode
+				# so the backdrop reads as the top-down board)
 				var focus := _demo_focus()
 				_cam_angle += delta * 0.08
 				var pos := focus + Vector3(cos(_cam_angle) * 42.0, 24.0, sin(_cam_angle) * 42.0)
+				if _gfx_mode == 0:
+					pos = focus + Vector3(cos(_cam_angle) * 22.0, 40.0, sin(_cam_angle) * 22.0)
 				var look := focus + Vector3.UP * 2.0
 				_cam_pos = _cam_pos.lerp(pos, 1.0 - exp(-2.2 * delta))
 				_cam_look = _cam_look.lerp(look, 1.0 - exp(-2.2 * delta))
@@ -656,65 +711,68 @@ func _demo_focus() -> Vector3:
 	return c / float(alive.size())
 
 func _topdown_camera(delta: float) -> void:
-	# Fixed, slightly-tilted top-down camera (spec §1): the whole playable
-	# circle stays in frame at any aspect ratio; steering projections and HUD
-	# keep working because the view direction is still ground-projected.
+	# Graph mode dispatcher (spec §1): 2D = genuine straight-down follow board,
+	# 3D = third-person chase (PUBG-style) behind and above the snake.
+	if _gfx_mode == 0:
+		_camera_2d_topdown(delta)
+	else:
+		_camera_3d_tps(delta)
+
+func _camera_2d_topdown(delta: float) -> void:
+	# TRUE top-down: the camera sits straight above the player, world north
+	# fixed up-screen, and follows the head with gentle smoothing. No tilt, no
+	# horizon — a modern overhead arena view. Height adapts to aspect so a
+	# narrow (portrait) screen still shows enough arena width.
 	var p := match_world.player
 	if p == null or not is_instance_valid(p):
 		return
 	_player_last_head = p.head_pos
-	if _topdown_dirty or _topdown_dist <= 0.0:
-		_topdown_fit()
 	cam.fov = 55.0
-	# Graphics mode: 2D = near straight-down board view; 3D = tilted cinematic.
-	var tilt := 0.36 if _gfx_mode == 1 else 0.055
-	var dir := Vector3(0.0, cos(tilt), sin(tilt))
-	var desired := Vector3.ZERO + dir * _topdown_dist
-	# ease toward the fixed pose (nice slide after the cinematic menu orbit)
-	if _topdown_dist > 0.0:
-		_cam_pos = _cam_pos.lerp(desired, 1.0 - exp(-4.5 * delta))
-	cam.global_position = _cam_pos
-	_cam_look = _cam_look.lerp(Vector3.ZERO + Vector3.UP * 0.5, 1.0 - exp(-4.5 * delta))
-	cam.look_at(_cam_look, Vector3.UP)
-
-func _topdown_fit() -> void:
-	# Bisection on the camera distance so every rim point of the play circle
-	# fits inside the frustum (both axes) with a small margin. Re-run on resize.
-	var R: float = match_world.arena_radius + 3.0
-	var tilt := 0.36 if _gfx_mode == 1 else 0.055
-	var dir := Vector3(0.0, cos(tilt), sin(tilt))     # camera sits south of center
-	var view := -dir                                  # looking north/down
-	var right := Vector3(1.0, 0.0, 0.0)
-	var up := right.cross(view).normalized()          # camera-up axis (world)
-	var tan_v := tan(deg_to_rad(cam.fov) * 0.5) * 0.94
-	var aspect := 1.6
 	var vp := get_viewport()
+	var aspect := 1.6
 	if vp != null and vp.get_visible_rect().size.y > 0.0:
 		aspect = vp.get_visible_rect().size.x / vp.get_visible_rect().size.y
-	var tan_h := tan_v * aspect
-	var ok := func(d: float) -> bool:
-		var cp := dir * d
-		for i in 24:
-			var ang := TAU * float(i) / 24.0
-			var P := Vector3(sin(ang) * R, 0.0, cos(ang) * R)
-			var rel := P - cp
-			var along := rel.dot(view)
-			if along < 0.1:
-				return false
-			if absf(rel.dot(up)) / along > tan_v:
-				return false
-			if absf(rel.dot(right)) / along > tan_h:
-				return false
-		return true
-	var lo := 12.0
-	var hi := 420.0
-	for it in 26:
-		var mid := (lo + hi) * 0.5
-		if ok.call(mid):
-			hi = mid
-		else:
-			lo = mid
-	_topdown_dist = hi
+	var h := 48.0 * clampf(1.55 / maxf(aspect, 0.6), 1.0, 1.7)
+	# follow the head with a touch of look-ahead, clamped so we never drift
+	# far past the arena wall
+	var fwd := Vector3(sin(p.heading), 0.0, cos(p.heading))
+	var want := p.head_pos + fwd * 4.0
+	var R: float = match_world.arena_radius + 2.0
+	want.x = clampf(want.x, -R, R)
+	want.z = clampf(want.z, -R, R)
+	_cam_pos = _cam_pos.lerp(Vector3(want.x, h, want.z), 1.0 - exp(-7.0 * delta))
+	_cam_look = _cam_look.lerp(want, 1.0 - exp(-7.0 * delta))
+	# straight-down orientation (fixed world basis; -Z is up-screen)
+	var b := Basis(Vector3(1, 0, 0), Vector3(0, 0, -1), Vector3(0, 1, 0))
+	cam.global_transform = Transform3D(b, Vector3(_cam_pos.x, h, _cam_pos.z))
+
+func _camera_3d_tps(delta: float) -> void:
+	# Third-person chase (spec §3): camera rides behind and above the snake,
+	# looking forward, with distance/height scaling to length, a boost FOV
+	# kick, and smoothing on both position and aim.
+	var p := match_world.player
+	if p == null or not is_instance_valid(p):
+		return
+	var head := p.head_pos
+	_player_last_head = head
+	var fwd := Vector3(sin(p.heading), 0.0, cos(p.heading))
+	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * (Snake.BOOST_MULT - 1.0)), 0.0, 1.0)
+	var len_extra := clampf(p.length * 0.045, 0.0, 2.6)
+	var dist := 9.0 + len_extra + (1.4 if p.boost_active else 0.0)
+	var height := 4.6 + len_extra * 0.7
+	var desired := head - fwd * dist + Vector3.UP * height
+	_cam_pos = _cam_pos.lerp(desired, 1.0 - exp(-5.5 * delta))
+	var look_target := head + fwd * (4.6 + boost_k * 2.6) + Vector3.UP * 1.1
+	_cam_look = _cam_look.lerp(look_target, 1.0 - exp(-7.0 * delta))
+	cam.global_position = _cam_pos
+	cam.look_at(_cam_look, Vector3.UP)
+	cam.fov = lerpf(cam.fov, 62.0 + boost_k * 8.0, 1.0 - exp(-6.0 * delta))
+
+func _topdown_fit() -> void:
+	# 2D board height for the current aspect — the follow camera needs no
+	# full-arena fit (3D TPS frames the snake), so this just caches a height
+	# hint used by dev tooling.
+	_topdown_dist = 48.0
 	_topdown_dirty = false
 
 # ---------------------------------------------------------------- app defaults
@@ -726,6 +784,11 @@ func _quit_nicely() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		_quit_nicely()
+	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_APPLICATION_PAUSED:
+		# backgrounded (phone app switch / screen off): never let the match
+		# keep running unattended — auto-pause and show the overlay (spec §3)
+		if state == State.PLAYING:
+			_pause()
 	elif what == NOTIFICATION_WM_GO_BACK_REQUEST:
 		# Android BACK (quit_on_go_back=false): pause in a match, otherwise
 		# hand the usual resume / menu paths (never hard-quit mid-run)

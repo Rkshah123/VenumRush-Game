@@ -35,6 +35,9 @@ var _preview_vp: SubViewport = null
 var _preview_cam: Camera3D = null
 var _preview_yaw := 0.0
 var _arena_label: Label
+var _pause_btn: Button = null
+var _quit_panel: PanelContainer = null
+var _safe_tick := -1
 var _page := "main"
 var _pause_panel: PanelContainer
 var _over_panel: PanelContainer
@@ -65,11 +68,14 @@ func _ready() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(root)
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	_apply_safe_area()
 
 	_build_gameplay()
 	_build_menu()
 	_build_pause()
 	_build_gameover()
+	_build_quit_confirm()
+	_build_pause_button()
 	show_menu(true)
 	set_gameplay_visible(false)
 	overlay_group.visible = false
@@ -192,6 +198,14 @@ func _build_gameplay() -> void:
 
 func set_gameplay_visible(v: bool) -> void:
 	gameplay_group.visible = v
+	if _pause_btn != null:
+		_pause_btn.visible = v
+		_pause_btn.text = "❚❚"
+
+func set_paused(paused: bool) -> void:
+	# HUD play/pause button mirrors the pause state (spec §3)
+	if _pause_btn != null:
+		_pause_btn.text = "▶" if paused else "❚❚"
 
 func set_score(v: int) -> void:
 	score_label.text = str(v)
@@ -238,6 +252,8 @@ func push_feed(kind: String, text: String) -> void:
 			role = "gold"
 	var lab := _mk_label(text, 14, role, null)
 	lab.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	lab.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lab.custom_minimum_size = Vector2(300, 0)
 	lab.modulate.a = 0.0
 	feed_box.add_child(lab)
 	if feed_box.get_child_count() > 6:
@@ -310,8 +326,8 @@ func _build_menu() -> void:
 
 	_ui_s = _ui_scale()
 
-	# FULL-SCREEN menu backdrop: gradient scrim over the live 3D arena; the
-	# right side stays open so the world animates behind the menu.
+	# FULL-SCREEN menu: the whole viewport is the title screen. A soft radial
+	# scrim keeps the live arena readable behind the centered hero column.
 	_menu_scrim = TextureRect.new()
 	_menu_scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_menu_scrim.stretch_mode = TextureRect.STRETCH_SCALE
@@ -319,31 +335,32 @@ func _build_menu() -> void:
 	menu_group.add_child(_menu_scrim)
 	_rebuild_menu_scrim()
 
-	# Hero column: left rail, fixed width, vertically centered, scaled to the
-	# screen — the rest of the screen stays a live window into the 3D arena.
-	var hero_wrap := Control.new()
-	hero_wrap.anchor_left = 0.0
-	hero_wrap.anchor_right = 0.0
-	hero_wrap.anchor_top = 0.0
-	hero_wrap.anchor_bottom = 1.0
-	hero_wrap.offset_left = int(40 * _ui_s)
-	hero_wrap.offset_right = int(40 * _ui_s + 392 * _ui_s)
-	hero_wrap.offset_top = 0
-	hero_wrap.offset_bottom = 0
+	# Centered hero column: logo, title, arena + mode pickers, actions.
+	var hero_wrap := CenterContainer.new()
+	hero_wrap.set_anchors_preset(Control.PRESET_FULL_RECT)
 	hero_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	menu_group.add_child(hero_wrap)
 	var vroot := VBoxContainer.new()
-	vroot.set_anchors_preset(Control.PRESET_FULL_RECT)
 	vroot.alignment = BoxContainer.ALIGNMENT_CENTER
-	vroot.add_theme_constant_override("separation", int(11 * _ui_s))
+	vroot.add_theme_constant_override("separation", int(9 * _ui_s))
+	vroot.custom_minimum_size = Vector2(420 * _ui_s, 0)
 	vroot.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hero_wrap.add_child(vroot)
 
-	_menu_title = _mk_label("SERPENTIS 3D", int(66 * _ui_s), "accent", vroot)
+	var logo := TextureRect.new()
+	logo.texture = load("res://icon.png")
+	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	logo.custom_minimum_size = Vector2(150 * _ui_s, 150 * _ui_s)
+	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vroot.add_child(logo)
+
+	_menu_title = _mk_label("SERPENTIS 3D", int(46 * _ui_s), "accent", vroot)
+	_menu_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_menu_title.add_theme_color_override("font_shadow_color", UiTheme.c("title_shadow"))
 	_menu_title.add_theme_constant_override("shadow_offset_y", 4)
-	var tag := _mk_label("Evolve. Hunt. Dominate.", int(17 * _ui_s), "dim", vroot)
-	tag.text = "  Evolve. Hunt. Dominate."
+	var tag := _mk_label("Evolve. Hunt. Dominate.", int(16 * _ui_s), "dim", vroot)
+	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
 	_menu_main = VBoxContainer.new()
 	_menu_main.add_theme_constant_override("separation", int(9 * _ui_s))
@@ -365,13 +382,24 @@ func _build_menu() -> void:
 	var next_b := _nav_button("►")
 	next_b.pressed.connect(func(): AudioMgr.play("click"); arena_shift.emit(1))
 	arow.add_child(next_b)
+	# quick graphics-mode selector right on the title screen (settings also
+	# carries the full 2D / 3D selector)
+	var mode_tag := _mk_label("MODE", int(11 * _ui_s), "dim", _menu_main)
+	mode_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var mrow := HBoxContainer.new()
+	mrow.alignment = BoxContainer.ALIGNMENT_CENTER
+	mrow.add_theme_constant_override("separation", 8)
+	_menu_main.add_child(mrow)
+	_option_button(mrow, "2D TOP-DOWN", "gfx_mode", 0, func(): _set_mode(int(SaveMgr.get_value("gfx_mode", 1))))
+	_option_button(mrow, "3D TPS", "gfx_mode", 1, func(): _set_mode((int(SaveMgr.get_value("gfx_mode", 1)) + 1) % 2))
 	_menu_button(_menu_main, "PLAY", func(): play_pressed.emit(), true)
 	_menu_button(_menu_main, "SNAKES", func(): _menu_page("skins"))
 	_menu_button(_menu_main, "SETTINGS", func(): _swap_menu(false))
 	_menu_button(_menu_main, "QUIT", func(): quit_pressed.emit())
 	var hint := _mk_label("", int(12 * _ui_s), "dim", vroot)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.text = "mouse steers, LMB boosts" if not OS.has_feature("android") else "drag steers, 2nd finger boosts"
-	hint.text = "   OFFLINE BUILD v0.1 — " + hint.text
+	hint.text = "OFFLINE BUILD v0.1 - " + hint.text
 
 	_menu_settings = VBoxContainer.new()
 	_menu_settings.add_theme_constant_override("separation", int(9 * _ui_s))
@@ -536,6 +564,10 @@ func _pick_skin(i: int) -> void:
 		_preview_snake.apply_skin(sk["dorsal"], sk["accent"], sk["belly"], sk["seed"], int(sk["pattern"]))
 
 func _process(delta: float) -> void:
+	# keep the HUD inside the mobile safe area across rotations / resizes
+	if int(Time.get_ticks_msec() / 500) != _safe_tick:
+		_safe_tick = int(Time.get_ticks_msec() / 500)
+		_apply_safe_area()
 	# slow breathing pulse on the menu title (ambient life on the start screen)
 	if menu_group != null and menu_group.visible and _menu_title != null and is_instance_valid(_menu_title):
 		_menu_title.modulate.a = 0.92 + 0.08 * sin(Time.get_ticks_msec() * 0.0016)
@@ -587,9 +619,28 @@ func _build_pause() -> void:
 	var hint := _mk_label("ESC TO RESUME" if not OS.has_feature("android") else "BACK / TAP RESUME", 13, "dim", p)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
+func _build_pause_button() -> void:
+	# Always-visible play/pause control (spec section 3) - top-right of the HUD
+	# in both 2D and 3D modes; lives on `root` so it stays tappable while paused
+	_pause_btn = Button.new()
+	_pause_btn.text = "||"
+	_pause_btn.tooltip_text = "PAUSE / RESUME"
+	_pause_btn.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_pause_btn.offset_left = -68
+	_pause_btn.offset_right = -16
+	_pause_btn.offset_top = 14
+	_pause_btn.offset_bottom = 74
+	_pause_btn.focus_mode = Control.FOCUS_NONE
+	_style_button(_pause_btn, true)
+	_pause_btn.add_theme_font_size_override("font_size", 24)
+	_pause_btn.add_theme_color_override("font_color", UiTheme.c("panel_bg"))
+	_pause_btn.pressed.connect(func(): AudioMgr.play("click"); pause_pressed.emit())
+	root.add_child(_pause_btn)
+	_pause_btn.visible = false
+
 func show_pause(v: bool) -> void:
 	_pause_panel.visible = v
-	overlay_group.visible = v
+	overlay_group.visible = v or (_quit_panel != null and _quit_panel.visible)
 
 # ---------------------------------------------------------------- game over
 
@@ -613,6 +664,8 @@ func show_gameover_hidden() -> void:
 	overlay_group.visible = false
 	_over_panel.visible = false
 	_pause_panel.visible = false
+	if _quit_panel != null:
+		_quit_panel.visible = false
 
 func show_gameover(stats: Dictionary) -> void:
 	_over_title.text = str(stats.get("title", "ELIMINATED"))
@@ -629,6 +682,41 @@ func show_gameover(stats: Dictionary) -> void:
 	overlay_group.visible = true
 	_pause_panel.visible = false
 	_over_panel.visible = true
+	if _quit_panel != null:
+		_quit_panel.visible = false
+
+# ---------------------------------------------------------------- quit confirm
+
+func _build_quit_confirm() -> void:
+	# "Do you want to close the game?" - themed, full-screen dialog (spec
+	# section 6). Cancel returns to the current screen without interrupting.
+	_quit_panel = PanelContainer.new()
+	_quit_panel.add_theme_stylebox_override("panel", _panel_style(0.96))
+	_quit_panel.set_anchors_preset(Control.PRESET_CENTER)
+	_quit_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_quit_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_quit_panel.visible = false
+	overlay_group.add_child(_quit_panel)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", int(14 * _ui_s))
+	v.custom_minimum_size = Vector2(340 * _ui_s, 0)
+	_quit_panel.add_child(v)
+	var msg := _mk_label("Do you want to close the game?", int(19 * _ui_s), "text", v)
+	msg.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	msg.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	var yes := _menu_button(v, "YES, QUIT", func(): quit_confirmed.emit())
+	yes.add_theme_color_override("font_color", UiTheme.c("warn"))
+	_menu_button(v, "CANCEL", func(): show_quit_confirm(false))
+
+func show_quit_confirm(v: bool) -> void:
+	if _quit_panel == null:
+		return
+	_quit_panel.visible = v
+	if v:
+		_pause_panel.visible = false
+		_over_panel.visible = false
+		overlay_group.visible = true
+		AudioMgr.play("click")
 
 # ---------------------------------------------------------------- signals (pause/gameover)
 
@@ -637,8 +725,40 @@ signal restart_pressed
 signal tomenu_pressed
 signal theme_changed(id: int)
 signal mode_changed(id: int)
+signal pause_pressed
+signal quit_confirmed
 
 # ---------------------------------------------------------------- helpers
+
+func _apply_safe_area() -> void:
+	# Keep UI clear of notches / system bars on mobile (spec section 7):
+	# inset the HUD root by the display safe area; no-op on desktop.
+	if root == null or not is_inside_tree():
+		return
+	var screen := Vector2(DisplayServer.screen_get_size())
+	if screen.x < 1.0 or screen.y < 1.0:
+		return
+	var safe: Rect2i = DisplayServer.get_display_safe_area()
+	if safe.size.x < 1 or safe.size.y < 1:
+		root.offset_left = 0
+		root.offset_top = 0
+		root.offset_right = 0
+		root.offset_bottom = 0
+		return
+	var vs := get_viewport().get_visible_rect().size
+	if vs.x < 1.0 or vs.y < 1.0:
+		return
+	var sx := vs.x / screen.x
+	var sy := vs.y / screen.y
+	var left: float = maxf(0.0, float(safe.position.x) * sx)
+	var top: float = maxf(0.0, float(safe.position.y) * sy)
+	var right: float = maxf(0.0, float(screen.x - (safe.position.x + safe.size.x)) * sx)
+	var bottom: float = maxf(0.0, float(screen.y - (safe.position.y + safe.size.y)) * sy)
+	# keep insets sane: never eat more than 8% of a screen edge
+	root.offset_left = minf(left, vs.x * 0.08)
+	root.offset_top = minf(top, vs.y * 0.08)
+	root.offset_right = -minf(right, vs.x * 0.08)
+	root.offset_bottom = -minf(bottom, vs.y * 0.08)
 
 func _ui_scale() -> float:
 	# Menu scale: comfortable on 720p desktops up to tall phone screens.
@@ -818,18 +938,22 @@ func _bar_bg() -> StyleBoxFlat:
 	return sb
 
 func _rebuild_menu_scrim() -> void:
-	# full-screen menu backdrop: horizontal gradient scrim — the live 3D arena
-	# stays visible on the right while the hero column stays readable
+	# radial vignette scrim — the live arena stays visible around the centered
+	# hero column but the middle stays readable in every theme
 	if _menu_scrim == null or not is_instance_valid(_menu_scrim):
 		return
 	var base := UiTheme.c("menu_scrim")
 	var g := Gradient.new()
-	g.offsets = PackedFloat32Array([0.0, 0.45, 0.85, 1.0])
-	g.colors = PackedColorArray([base, base, UiTheme.with_alpha("menu_scrim", base.a * 0.35), Color(base.r, base.g, base.b, 0.0)])
+	g.offsets = PackedFloat32Array([0.0, 0.55, 1.0])
+	g.colors = PackedColorArray([
+		UiTheme.with_alpha("menu_scrim", base.a * 0.55),
+		UiTheme.with_alpha("menu_scrim", base.a * 0.72),
+		base])
 	var tex := GradientTexture2D.new()
 	tex.gradient = g
 	tex.width = 256
-	tex.height = 8
-	tex.fill_from = Vector2(0, 0)
-	tex.fill_to = Vector2(1, 0)
+	tex.height = 256
+	tex.fill = GradientTexture2D.FILL_RADIAL
+	tex.fill_from = Vector2(0.5, 0.5)
+	tex.fill_to = Vector2(1.0, 0.5)
 	_menu_scrim.texture = tex

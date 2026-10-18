@@ -113,16 +113,21 @@ func _idle_drift_dir(delta: float) -> Vector3:
 	return fwd.rotated(Vector3.UP, turn * delta)
 
 func _screen_offset_to_dir(off: Vector2, cam: Camera3D) -> Vector3:
-	# Screen-offset → world direction. off.y < 0 = pointer BELOW center =
+	# Screen-offset -> world direction. off.y < 0 = pointer BELOW center =
 	# steer toward camera-forward (snake moves down-screen); drag up = steer
-	# away from the camera (toward the horizon).
+	# away from the camera (toward the horizon). The straight-down 2D camera
+	# has a degenerate view vector (looking straight down), so fall back to
+	# the camera's screen-up axis for the "forward" ground direction.
 	var basis := cam.global_transform.basis
 	var right := basis.x
 	right.y = 0.0
 	right = right.normalized()
 	var fwd := -basis.z
 	fwd.y = 0.0
-	fwd = fwd.normalized()
+	if fwd.length_squared() < 0.01:
+		fwd = basis.y          # top-down: screen-up axis on the ground plane
+		fwd.y = 0.0
+	fwd = fwd.normalized() if fwd.length_squared() > 0.01 else Vector3(0, 0, 1)
 	var d := right * off.x + fwd * (-off.y)
 	d.y = 0.0
 	return d.normalized() if d.length_squared() > 0.9 else d
