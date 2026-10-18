@@ -32,7 +32,7 @@ var _pop_hits := 0
 # ---------------------------------------------------------------- lifecycle
 
 func _ready() -> void:
-	_slots = [_make_pool(0, _apple_mesh()), _make_pool(1, _berries_mesh()), _make_pool(2, _mango_mesh())]
+	_slots = [_make_pool(0, _real_fruit_mesh(0)), _make_pool(1, _real_fruit_mesh(1)), _make_pool(2, _real_fruit_mesh(2))]
 	_pop_mesh = SphereMesh.new()
 	_pop_mesh.radius = 0.09
 	_pop_mesh.height = 0.18
@@ -221,7 +221,40 @@ func _process(delta: float) -> void:
 			break
 
 # ---------------------------------------------------------------- fruit meshes
-# Each fruit merges: body + stem/leaf + ground shadow blob → ONE mesh, shared.
+# Fruits use the LowPolyFoodPack models (user-provided OBJ, flat colors) when
+# available, normalized to gameplay size with our vivid color-coding + emission
+# so each kind stays readable at distance; procedural builders remain as
+# fallback. Each final mesh = model surfaces + ground shadow blob → ONE mesh.
+
+const OBJ_PATHS := ["res://models/food/apple.obj", "res://models/food/cherries.obj", "res://models/food/lemon.obj"]
+const OBJ_HEIGHT := [0.55, 0.46, 0.54]
+const OBJ_EMIT := [0.35, 0.45, 0.5]
+
+func _real_fruit_mesh(kind: int) -> Mesh:
+	var src: Mesh = load(OBJ_PATHS[kind]) as Mesh
+	if src == null:
+		return [_apple_mesh, _berries_mesh, _mango_mesh][kind].call()
+	var am := ArrayMesh.new()
+	var bb := src.get_aabb()
+	var sc: float = OBJ_HEIGHT[kind] / maxf(bb.size.y, 0.001)
+	var lift: float = -bb.position.y * sc
+	for i in src.get_surface_count():
+		var nm: String = ""
+		if src is ArrayMesh:
+			nm = (src as ArrayMesh).surface_get_name(i)
+		var st := SurfaceTool.new()
+		st.append_from(src, i, Transform3D(Basis().scaled(Vector3(sc, sc, sc)), Vector3(0.0, lift, 0.0)))
+		if nm.contains("leaf"):
+			st.set_material(_leaf_mat())
+		elif nm.contains("trunk") or nm.contains("stalk"):
+			st.set_material(_stem_mat())
+		else:
+			st.set_material(_fruit_base_mat(KIND_COLORS[kind].lightened(0.08), OBJ_EMIT[kind], 0.34))
+		st.commit(am)
+	var sbl := SurfaceTool.new()
+	_blob_surface(sbl)
+	sbl.commit(am)
+	return am
 
 func _fruit_base_mat(albedo: Color, emit: float, rough: float) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
