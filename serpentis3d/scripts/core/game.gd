@@ -30,6 +30,7 @@ var _uix_test := false
 var _mode_test := false
 var _joy_test := false
 var _dir_test := false
+var _ctrl_test := false
 var _joy_dev := false
 var _shot_game := false
 var _quit_at := -1.0
@@ -114,6 +115,11 @@ func _ready() -> void:
 			_dir_test = true
 			_no_death_dev = true
 			_solo_dev = true
+		if a == "--ctrl-test":
+			_autoplay = true
+			_ctrl_test = true
+			_no_death_dev = true
+			_solo_dev = true
 	_arena_key = str(SaveMgr.get_value("arena", "valley"))
 	if arena_dev != "" and ArenaPresets.ALL.has(arena_dev):
 		_arena_key = arena_dev
@@ -129,6 +135,7 @@ func _ready() -> void:
 	match_world.gfx_mode = _gfx_mode
 	match_world.dark = _theme_id == UiTheme.DARK
 	add_child(match_world)
+	hud.minimap().world = match_world      # arena radar reads the live world
 	match_world.match_event.connect(hud.push_feed)
 	match_world.player_died.connect(_on_player_died)
 	hud.set_arena(_arena_key)
@@ -174,7 +181,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test", "--uix-test", "--mode-test", "--joystick", "--joy-test", "--dir-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test", "--uix-test", "--mode-test", "--joystick", "--joy-test", "--dir-test", "--ctrl-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -265,6 +272,9 @@ func _dev_sequence() -> void:
 		return
 	if _dir_test:
 		await _dir_test_run()
+		return
+	if _ctrl_test:
+		await _ctrl_test_run()
 		return
 	if _touch_test:
 		await _touch_test_run()
@@ -450,9 +460,13 @@ func _frames(n: int) -> void:
 		await get_tree().physics_frame
 
 func _key_event(code: int, pressed: bool) -> void:
+	_key_event_mod(code, pressed, false)
+
+func _key_event_mod(code: int, pressed: bool, shift: bool) -> void:
 	var e := InputEventKey.new()
 	e.keycode = code
 	e.physical_keycode = code
+	e.shift_pressed = shift
 	e.pressed = pressed
 	Input.parse_input_event(e)
 
@@ -567,6 +581,178 @@ func _dir_test_run() -> void:
 	fails += await _dir_joy_test()
 	print("DIRTEST RESULT %s" % ["PASS - every direction key steers the way it is pressed" if fails == 0 else "FAIL (%d checks)" % fails])
 	await _snap("shot_dirtest.png")
+	_quit_nicely()
+
+# ---------------------------------------------------------------- ctrl QA
+
+## Control QA: 360-degree mobile steering, release-keeps-going, touch anywhere
+## (never stealing a HUD tap), and desktop keys surviving pause/restart.
+func _ctrl_test_run() -> void:
+	_joy_dev = true
+	_solo_dev = true
+	_no_death_dev = true
+	hud.mode_changed.emit(0)          # the stick lives in 2D mode
+	_start_play()
+	await get_tree().create_timer(0.9).timeout
+	match_world.no_death = true
+	var p: PlayerSnake = match_world.player
+	var joy: TouchJoystick = hud.joystick()
+	p.autopilot = false
+	p._is_mobile = true
+	await _frames(30)
+	var fails := 0
+	var bad := 0
+	# --- 1. every 15 degrees around the circle must steer that way ---
+	for deg in range(0, 360, 15):
+		var a := deg_to_rad(float(deg))
+		var v := Vector2(cos(a), sin(a))
+		p.head_pos = Vector3.ZERO
+		p.heading = 0.0
+		joy.force_value(v)
+		await _frames(70)             # let the turn rate settle
+		var before: Vector3 = p.head_pos
+		await _frames(18)
+		var moved: Vector3 = p.head_pos - before
+		moved.y = 0.0
+		var want := _screen_dir_to_world(v)
+		var mn: Vector3 = moved.normalized() if moved.length() > 0.001 else Vector3.ZERO
+		var dot := mn.dot(want)
+		if not (moved.length() > 0.6 and dot > 0.96):
+			bad += 1
+			print("CTRLTEST angle %3d deg dot=%.3f moved=%.2f FAIL" % [deg, dot, moved.length()])
+	joy.force_release()
+	print("CTRLTEST 360 sweep %d angles %s" % [24,
+		"PASS" if bad == 0 else "FAIL (%d)" % bad])
+	if bad > 0:
+		fails += bad
+	# --- 1b. same behavior in 3D mode (the stick is available in both) ---
+	hud.mode_changed.emit(1)
+	await _frames(60)
+	var bad3 := 0
+	for deg in [15, 30, 45, 60, 75, 135, 225, 315]:
+		var a3 := deg_to_rad(float(deg))
+		var v3 := Vector2(cos(a3), sin(a3))
+		p.head_pos = Vector3.ZERO
+		p.heading = 0.0
+		joy.force_value(v3)
+		await _frames(70)
+		var b3: Vector3 = p.head_pos
+		await _frames(18)
+		var m3: Vector3 = p.head_pos - b3
+		m3.y = 0.0
+		var w3 := _screen_dir_to_world(v3)
+		var n3: Vector3 = m3.normalized() if m3.length() > 0.001 else Vector3.ZERO
+		if not (m3.length() > 0.6 and n3.dot(w3) > 0.96):
+			bad3 += 1
+			print("CTRLTEST 3D angle %3d deg dot=%.3f FAIL" % [deg, n3.dot(w3)])
+	joy.force_release()
+	print("CTRLTEST 3D sweep 8 angles %s" % ["PASS" if bad3 == 0 else "FAIL (%d)" % bad3])
+	if bad3 > 0:
+		fails += bad3
+	hud.mode_changed.emit(0)
+	await _frames(40)
+	# --- 2. release keeps the last direction, snake never stops ---
+	p.head_pos = Vector3.ZERO
+	p.heading = 0.0
+	joy.force_value(Vector2(0.0, 1.0))
+	await _frames(70)
+	joy.force_release()
+	var h0 := p.heading
+	var pos0: Vector3 = p.head_pos
+	await _frames(90)
+	var drift := absf(wrapf(p.heading - h0, -PI, PI))
+	var rolled := p.head_pos.distance_to(pos0)
+	var kept: bool = drift < 0.05 and rolled > 4.0 and joy.last_dir == Vector2(0, 1)
+	print("CTRLTEST release keeps heading drift=%.3f travelled=%.1fm last_dir=%s %s" % [
+		drift, rolled, str(joy.last_dir), "PASS" if kept else "FAIL"])
+	if not kept:
+		fails += 1
+	# --- 3. a touch ANYWHERE grabs the stick (not just the left zone) ---
+	var vs := get_viewport().get_visible_rect().size
+	var far_spot := Vector2(vs.x * 0.78, vs.y * 0.45)
+	_touch_event(0, far_spot, true)
+	await _frames(3)
+	var grabbed: bool = joy.active and joy.center().distance_to(far_spot) < 3.0
+	_drag_event(0, far_spot + Vector2(0.0, -joy.radius() * 0.8))
+	await _frames(6)
+	var up_val: Vector2 = joy.value
+	_touch_event(0, far_spot + Vector2(0.0, -joy.radius() * 0.8), false)
+	await _frames(3)
+	var any_ok: bool = grabbed and up_val.y > 0.6
+	print("CTRLTEST touch-anywhere spot=(%.0f,%.0f) active=%s base_moved=%s value=%s %s" % [
+		far_spot.x, far_spot.y, str(joy.active), str(grabbed), str(up_val),
+		"PASS" if any_ok else "FAIL"])
+	if not any_ok:
+		fails += 1
+	# --- 4. the stick never steals a tap that belongs to a HUD control ---
+	var pb: Button = hud._pause_btn
+	var prect := pb.get_global_rect()
+	var pspot := prect.get_center()
+	_touch_event(0, pspot, true)
+	await _frames(3)
+	var stolen: bool = joy.active
+	_touch_event(0, pspot, false)
+	await _frames(3)
+	var ui_ok: bool = not stolen and hud.blocks_touch(pspot) and not hud.blocks_touch(vs * 0.5)
+	print("CTRLTEST ui-block pause_rect=%s stick_stole=%s %s" % [
+		str(prect.size.round()), str(stolen), "PASS" if ui_ok else "FAIL"])
+	if not ui_ok:
+		fails += 1
+	# --- 5. keys still work after pause/resume and after a restart ---
+	p.keyboard_only = true
+	_pause()
+	await _frames(4)
+	_resume()
+	await _frames(10)
+	_key_event(KEY_D, true)
+	await _frames(4)
+	var after_pause := p.desired_dir
+	_key_event(KEY_D, false)
+	_restart()
+	await get_tree().create_timer(0.7).timeout
+	var p2: PlayerSnake = match_world.player
+	p2.autopilot = false
+	p2.keyboard_only = true
+	await _frames(10)
+	_key_event(KEY_W, true)
+	await _frames(4)
+	var after_restart := p2.desired_dir
+	_key_event(KEY_W, false)
+	var key_ok: bool = after_pause.normalized().dot(_screen_dir_to_world(Vector2(1, 0))) > 0.95 \
+		and after_restart.normalized().dot(_screen_dir_to_world(Vector2(0, 1))) > 0.95
+	print("CTRLTEST keys after pause/resume=%s after restart=%s %s" % [
+		str(after_pause), str(after_restart), "PASS" if key_ok else "FAIL"])
+	if not key_ok:
+		fails += 1
+	# --- 6. SHIFT+W (uppercase) still steers up, and WASD/arrows mix freely ---
+	p2.clear_keys()
+	_key_event_mod(KEY_W, true, true)    # SHIFT+W = uppercase W
+	await _frames(3)
+	var shifted: Vector2 = p2._keys_dir
+	_key_event(KEY_UP, true)          # same direction from the other scheme
+	await _frames(3)
+	var both: Vector2 = p2._keys_dir
+	_key_event(KEY_W, false)          # release one of the two
+	await _frames(3)
+	var still_up: Vector2 = p2._keys_dir
+	_key_event(KEY_A, true)           # add a second direction -> diagonal
+	await _frames(3)
+	var diag: Vector2 = p2._keys_dir
+	_key_event(KEY_UP, false)
+	_key_event(KEY_A, false)
+	await _frames(3)
+	var cleared: Vector2 = p2._keys_dir
+	var mix_ok: bool = shifted == Vector2(0, 1) and both == Vector2(0, 1) \
+		and still_up == Vector2(0, 1) \
+		and diag.normalized().dot(Vector2(-0.707, 0.707)) > 0.99 \
+		and cleared == Vector2.ZERO
+	print("CTRLTEST shift/mix w=%s w+up=%s after-release-w=%s w+a=%s cleared=%s %s" % [
+		str(shifted), str(both), str(still_up), str(diag), str(cleared),
+		"PASS" if mix_ok else "FAIL"])
+	if not mix_ok:
+		fails += 1
+	print("CTRLTEST RESULT %s" % ["PASS" if fails == 0 else "FAIL (%d)" % fails])
+	await _snap("shot_ctrl.png")
 	_quit_nicely()
 
 ## Mobile stick QA: a touch anywhere in the left zone grabs the stick (the
@@ -895,6 +1081,8 @@ func _rebuild_world() -> void:
 	match_world.gfx_mode = _gfx_mode
 	match_world.dark = _theme_id == UiTheme.DARK
 	add_child(match_world)
+	if hud.minimap() != null:
+		hud.minimap().world = match_world   # radar follows the rebuilt world
 	match_world.match_event.connect(hud.push_feed)
 	match_world.player_died.connect(_on_player_died)
 

@@ -69,8 +69,12 @@ func obtain_obstacles() -> Array:
 func _dk(c: Color, f: float = 0.52) -> Color:
 	if not _dark:
 		return c
-	var dark := Color(c.r * f, c.g * f * 1.02, c.b * f * 1.15)
-	return dark.lerp(Color(0.030, 0.042, 0.075), 0.30)
+	# The flat 2D board is read at a glance from far above, so it is lifted a
+	# little out of the gloom: the court stays legible while the dark-theme mood
+	# (and the contrast between board and surroundings) is preserved.
+	var ff := lerpf(f, minf(1.0, f * 1.45), 1.0 if _mode_2d else 0.0)
+	var dark := Color(c.r * ff, c.g * ff * 1.02, c.b * ff * 1.15)
+	return dark.lerp(Color(0.030, 0.042, 0.075), 0.30 * (0.5 if _mode_2d else 1.0))
 
 func _ready() -> void:
 	# perf bisect switch (dev): ENV_SKIP=1 court+sky, 2 +terrain rings,
@@ -343,7 +347,11 @@ func _terrain_material() -> ShaderMaterial:
 func _build_sky_and_lights() -> void:
 	var sun := DirectionalLight3D.new()
 	sun.light_color = _dk(Color(_p["sun_color"]), 0.72).lerp(Color(0.72, 0.80, 1.0), 0.35) if _dark else Color(_p["sun_color"])
-	var sun_e := float(_p["sun_energy"]) * (0.62 if _dark else 1.0) * (0.88 if _mode_2d else 1.0)
+	var sun_e := float(_p["sun_energy"]) * (0.62 if _dark else 1.0)
+	if _mode_2d:
+		# overhead ortho view loses the shading that sells depth, so the board
+		# gets a touch more light instead of the usual 0.88 trim
+		sun_e *= 1.04 if _dark else 0.94
 	sun.light_energy = sun_e
 	var yaw := float(_p["sun_yaw"])
 	var pitch := float(_p["sun_pitch"])

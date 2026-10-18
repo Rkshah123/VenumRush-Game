@@ -36,9 +36,17 @@ func _input(event: InputEvent) -> void:
 	var k := event as InputEventKey
 	if _key_dir_for(k.keycode) == Vector2.ZERO:
 		return
+	if _text_field_focused():
+		return          # never steer while the player is typing somewhere
 	_key_input(event)
 	if k.pressed:
 		get_viewport().set_input_as_handled()   # no scrolling / focus moves
+
+## True when a text-entry control owns the keyboard (defensive: no text fields
+## in the game today, but movement keys must never fight typing).
+func _text_field_focused() -> bool:
+	var f := get_viewport().gui_get_focus_owner()
+	return f is LineEdit or f is TextEdit or f is CodeEdit
 
 func _unhandled_input(event: InputEvent) -> void:
 	if autopilot:
@@ -138,7 +146,7 @@ func _steer(delta: float) -> void:
 ## Key events -> absolute screen-space direction (x right, y up). Event-based
 ## so it works regardless of focus quirks and can be driven by QA tests.
 func _key_input(event: InputEvent) -> void:
-	if not (event is InputEventKey):
+	if not (event is InputEventKey) or _text_field_focused():
 		return
 	var k := event as InputEventKey
 	var d := _key_dir_for(k.keycode)

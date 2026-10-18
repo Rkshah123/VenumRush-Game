@@ -39,6 +39,7 @@ var _pause_btn: Button = null
 var _quit_panel: PanelContainer = null
 var _pause_settings := false
 var _joystick: TouchJoystick = null
+var _minimap: ArenaMinimap = null
 var _boost_panel: PanelContainer = null
 var _menu_column: VBoxContainer = null
 var _safe_tick := -1
@@ -125,15 +126,22 @@ func _build_gameplay() -> void:
 	kills_label = _mk_label("KILLS 0", 15, "text", hrow)
 	gameplay_group.add_child(top)
 
-	# kill feed
+	# whole-arena radar, top-right (reference-frame idea: the whole board at a
+	# glance). Lives in the gameplay layer; pause button moved to the top-left.
+	_minimap = ArenaMinimap.new()
+	_minimap.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_minimap.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_minimap.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	gameplay_group.add_child(_minimap)
+
+	# kill feed — under the radar so the two never overlap
 	var feed_panel := VBoxContainer.new()
 	feed_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	feed_panel.position = Vector2(-40, 74)   # offset handled below via alignment
 	feed_panel.anchor_left = 1.0
 	feed_panel.anchor_right = 1.0
 	feed_panel.offset_left = -330
 	feed_panel.offset_right = -14
-	feed_panel.offset_top = 78
+	feed_panel.offset_top = 186
 	feed_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	feed_box = VBoxContainer.new()
 	feed_box.add_theme_constant_override("separation", 4)
@@ -212,6 +220,8 @@ func set_gameplay_visible(v: bool) -> void:
 	if _pause_btn != null:
 		_pause_btn.visible = v
 		_pause_btn.text = "❚❚"
+	if _minimap != null:
+		_minimap.live = v
 	if _joystick != null:
 		_refresh_joystick(v)
 
@@ -219,15 +229,45 @@ func set_paused(paused: bool) -> void:
 	# HUD play/pause button mirrors the pause state (spec §3)
 	if _pause_btn != null:
 		_pause_btn.text = "▶" if paused else "❚❚"
+	if _minimap != null:
+		_minimap.live = not paused and gameplay_group.visible
 
 # ---------------------------------------------------------------- joystick
 
 func _build_joystick() -> void:
-	# PUBG-style left joystick: mobile + 2D mode only (spec §2)
+	# Mobile touch stick: floats to wherever the first finger lands (so "drag
+	# anywhere" works) and never steals a tap that belongs to a HUD control.
 	_joystick = TouchJoystick.new()
 	_joystick.name = "Joystick"
+	_joystick.ui_blocker = blocks_touch
 	gameplay_group.add_child(_joystick)
 	_refresh_joystick(false)
+
+## True when a HUD control owns this screen point. The stick consults this so a
+## tap on the pause button (or a dialog button) reaches the UI instead.
+func blocks_touch(p: Vector2) -> bool:
+	if root == null:
+		return false
+	return _control_owns(root, p)
+
+func _control_owns(n: Node, p: Vector2) -> bool:
+	for c in n.get_children():
+		if c is Control:
+			var cc := c as Control
+			if cc == _joystick or not cc.is_visible_in_tree():
+				continue
+			# Only real widgets own a tap. Layout containers default to STOP but
+			# cover the screen (the centre "announce" VBox does), and blocking
+			# those would make half the board dead to the stick.
+			if cc is BaseButton and cc.mouse_filter == Control.MOUSE_FILTER_STOP \
+					and cc.get_global_rect().has_point(p):
+				return true
+			if _control_owns(cc, p):
+				return true
+	return false
+
+func minimap() -> ArenaMinimap:
+	return _minimap
 
 func joystick() -> TouchJoystick:
 	return _joystick
@@ -238,14 +278,18 @@ func _is_touch_device() -> bool:
 func _refresh_joystick(in_gameplay: bool) -> void:
 	if _joystick == null:
 		return
-	var want := in_gameplay and _is_touch_device() and int(SaveMgr.get_value("gfx_mode", 1)) == 0
-	if _joystick.force_joystick_dev:
-		want = in_gameplay and int(SaveMgr.get_value("gfx_mode", 1)) == 0
+	# Touch devices get the floating stick in BOTH 2D and 3D so the control
+	# scheme is identical everywhere; the stick follows the finger, so it is a
+	# readout of "drag anywhere", not a fixed on-screen widget.
+	var want := in_gameplay and (_is_touch_device() or force_joystick_dev())
 	_joystick.enabled = want
 	if not want:
 		_joystick.force_release()
 	_move_hud_for_joystick(want)
 	_refresh_joystick_layout()
+
+func force_joystick_dev() -> bool:
+	return _joystick != null and _joystick.force_joystick_dev
 
 func _move_hud_for_joystick(on: bool) -> void:
 	# the stick owns the bottom-left corner: shift boost/ability panels to the
@@ -277,16 +321,27 @@ func _refresh_joystick_layout() -> void:
 	var vs := get_viewport().get_visible_rect().size
 	var sl := 0.0
 	var sb := 0.0
+	var sr := 0.0
 	if screen.x > 1.0 and screen.y > 1.0:
 		var safe: Rect2i = DisplayServer.get_display_safe_area()
 		if safe.size.x > 1 and safe.size.y > 1:
 			sl = maxf(0.0, float(safe.position.x)) * (vs.x / screen.x)
 			sb = maxf(0.0, float(screen.y - (safe.position.y + safe.size.y))) * (vs.y / screen.y)
+			sr = maxf(0.0, float(screen.x - (safe.position.x + safe.size.x))) * (vs.x / screen.x)
 	var s := clampf(vs.y / 900.0, 0.8, 1.5)
 	_joystick.configure(s, sl + root.offset_left, sb + root.offset_bottom)
+	if _minimap != null:
+		_minimap.configure(s, _minimap.radius)
+		var mm := _minimap.size
+		# top-right, inside the safe area (notch / rounded corners)
+		_minimap.offset_left = -mm.x - 14.0 - sr
+		_minimap.offset_right = -14.0 - sr
+		_minimap.offset_top = 14.0
+		_minimap.offset_bottom = 14.0 + mm.y
 
 func set_joystick_mode(_is_2d: bool) -> void:
-	# graphics mode changed: the stick only exists in mobile 2D mode
+	# graphics mode changed: the stick is available in both modes, but refresh
+	# so the boost/ability panels re-flow if the layout changed
 	_refresh_joystick(gameplay_group.visible)
 
 func set_score(v: int) -> void:
@@ -811,14 +866,15 @@ func _open_settings_from_pause() -> void:
 	_menu_page("settings")
 
 func _build_pause_button() -> void:
-	# Always-visible play/pause control (spec section 3) - top-right of the HUD
-	# in both 2D and 3D modes; lives on `root` so it stays tappable while paused
+	# Always-visible play/pause control (spec section 3) - TOP-LEFT of the HUD
+	# in both 2D and 3D modes (the top-right corner belongs to the arena radar);
+	# lives on `root` so it stays tappable while paused
 	_pause_btn = Button.new()
 	_pause_btn.text = "||"
 	_pause_btn.tooltip_text = "PAUSE / RESUME"
-	_pause_btn.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	_pause_btn.offset_left = -68
-	_pause_btn.offset_right = -16
+	_pause_btn.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_pause_btn.offset_left = 16
+	_pause_btn.offset_right = 76
 	_pause_btn.offset_top = 14
 	_pause_btn.offset_bottom = 74
 	_pause_btn.focus_mode = Control.FOCUS_NONE

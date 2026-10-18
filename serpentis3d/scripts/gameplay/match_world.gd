@@ -95,7 +95,10 @@ func start_match() -> void:
 	var p: PlayerSnake = PlayerSnake.new()
 	_attach(p, true, 7.0)
 	player = p
-	match_event.emit("info", "STEER WITH THE POINTER — HOLD LMB/SPACE TO BOOST")
+	var touch: bool = OS.has_feature("android") or OS.has_feature("ios")
+	match_event.emit("info",
+		"DRAG ANYWHERE TO STEER — HOLD A 2ND FINGER TO BOOST" if touch
+		else "STEER WITH THE POINTER OR WASD / ARROWS — HOLD LMB/SPACE TO BOOST")
 	# AI roster (skippable in dev-solo runs)
 	var ai_target: int = AI_TARGET if not solo_dev else 0
 	for i in ai_target:
