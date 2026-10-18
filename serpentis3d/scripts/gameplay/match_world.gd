@@ -157,7 +157,7 @@ func _physics_process(delta: float) -> void:
 		_worst_dt = delta
 	if _hb > 5.0 and verbose:
 		_hb = 0.0
-		print("HB t=%.1f snakes=%d orbs=%d fps=%d worst_dt=%.0fms" % [match_time, snake_count(), food.count_alive(), Engine.get_frames_per_second(), _worst_dt * 1000.0])
+		print("HB t=%.1f snakes=%d orbs=%d fps=%d worst_dt=%.0fms | %s" % [match_time, snake_count(), food.count_alive(), Engine.get_frames_per_second(), _worst_dt * 1000.0, food.debug_state()])
 		_worst_dt = 0.0
 
 	# boss appears in real matches after 60 s

@@ -92,7 +92,18 @@ func reset() -> void:
 			_spawn_orb(kind)
 
 func count_alive() -> int:
-	return _total
+	# ground truth: sum of live slot records (catches _total drift)
+	var n := 0
+	for s in _slots:
+		n += (s["alive"] as Dictionary).size()
+	return n
+
+func debug_state() -> String:
+	var parts: Array[String] = []
+	for kind in 3:
+		var s: Dictionary = _slots[kind]
+		parts.append("k%d alive=%d free=%d def=%d" % [kind, (s["alive"] as Dictionary).size(), (s["free"] as Array).size(), _deficit[kind]])
+	return "total=%d " % _total + " ".join(parts)
 
 # ---------------------------------------------------------------- spawn/remove
 
@@ -202,9 +213,9 @@ func _process(delta: float) -> void:
 			var yy := 0.34 + sin(t * 2.0 + ph) * 0.07
 			var basis := Basis(Vector3.UP, yaw)
 			mm.set_instance_transform(idx, Transform3D(basis, p + Vector3(0.0, yy, 0.0)))
-	# trickle respawn (1 per frame top)
+	# trickle respawn (top: 1 per frame) — also respects the global budget
 	for kind in 3:
-		if _deficit[kind] > 0:
+		if _deficit[kind] > 0 and _total < HARD_CAP:
 			_deficit[kind] -= 1
 			_spawn_orb(kind)
 			break
