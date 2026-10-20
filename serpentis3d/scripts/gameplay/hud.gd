@@ -1308,13 +1308,19 @@ func _refresh_options() -> void:
 		normal.bg_color = accent if sel else UiTheme.with_alpha("btn_bg", 0.94)
 		normal.border_color = accent
 		normal.set_border_width_all(2 if sel else 1)
-		normal.set_corner_radius_all(8)
+		normal.set_corner_radius_all(9)
 		normal.content_margin_left = 10
 		normal.content_margin_right = 10
 		normal.content_margin_top = 6
 		normal.content_margin_bottom = 6
+		normal.shadow_color = Color(accent.r, accent.g, accent.b, 0.16) if sel else Color(0, 0, 0, 0.30)
+		normal.shadow_size = 5 if sel else 4
+		normal.shadow_offset = Vector2(0, 2)
 		var hover := normal.duplicate() as StyleBoxFlat
+		hover.shadow_size = 7
+		hover.shadow_offset = Vector2(0, 3)
 		hover.bg_color = accent.lightened(0.10) if sel else UiTheme.c("btn_hover_bg")
+		_add_sheen(b)
 		b.add_theme_stylebox_override("normal", normal)
 		b.add_theme_stylebox_override("hover", hover)
 		b.add_theme_stylebox_override("pressed", hover)
@@ -1329,35 +1335,64 @@ func _refresh_options() -> void:
 
 func _style_button(b: Control, primary: bool = false) -> void:
 	var accent := UiTheme.c("accent")
-	var make := func(bg: Color, border: Color) -> StyleBoxFlat:
+	# Themed button "material" (spec §4): one restrained corner radius, a
+	# thin border, and a soft drop shadow so the button reads as a solid
+	# physical piece seated in the UI. Primary actions glow with the accent
+	# tint; secondary actions cast a neutral shadow. Hover lifts the shadow,
+	# pressed sinks it — tactile without any texture assets.
+	var make := func(bg: Color, border: Color, shadow: Color, blur: int, drop: int) -> StyleBoxFlat:
 		var sb := StyleBoxFlat.new()
 		sb.bg_color = bg
 		sb.border_color = border
 		sb.set_border_width_all(1)
-		sb.set_corner_radius_all(8)
+		sb.set_corner_radius_all(10)
 		sb.content_margin_left = 14
 		sb.content_margin_right = 14
 		sb.content_margin_top = 8
 		sb.content_margin_bottom = 8
+		sb.shadow_color = shadow
+		sb.shadow_size = blur
+		sb.shadow_offset = Vector2(0, drop)
 		return sb
 	if primary:
-		b.add_theme_stylebox_override("normal", make.call(accent, accent))
-		b.add_theme_stylebox_override("hover", make.call(accent.lightened(0.10), accent))
-		b.add_theme_stylebox_override("pressed", make.call(accent.darkened(0.10), accent))
-		b.add_theme_stylebox_override("focus", make.call(accent.lightened(0.05), accent))
+		var glow := Color(accent.r, accent.g, accent.b, 0.20)
+		var glow_hi := Color(accent.r, accent.g, accent.b, 0.30)
+		b.add_theme_stylebox_override("normal", make.call(accent, accent, glow, 7, 3))
+		b.add_theme_stylebox_override("hover", make.call(accent.lightened(0.08), accent.lightened(0.18), glow_hi, 10, 4))
+		b.add_theme_stylebox_override("pressed", make.call(accent.darkened(0.10), accent, glow, 3, 1))
+		b.add_theme_stylebox_override("focus", make.call(accent.lightened(0.04), accent.lightened(0.12), glow_hi, 9, 4))
 	else:
-		b.add_theme_stylebox_override("normal", make.call(UiTheme.with_alpha("btn_bg", 0.90), UiTheme.c("btn_border")))
-		b.add_theme_stylebox_override("hover", make.call(UiTheme.with_alpha("btn_hover_bg", 0.95), accent))
-		b.add_theme_stylebox_override("pressed", make.call(UiTheme.with_alpha("btn_hover_bg", 0.95), accent))
-		b.add_theme_stylebox_override("focus", make.call(UiTheme.with_alpha("btn_hover_bg", 0.95), accent))
+		var dark := Color(0.0, 0.0, 0.0, 0.38)
+		b.add_theme_stylebox_override("normal", make.call(UiTheme.with_alpha("btn_bg", 0.90), UiTheme.c("btn_border"), dark, 6, 3))
+		b.add_theme_stylebox_override("hover", make.call(UiTheme.with_alpha("btn_hover_bg", 0.95), accent, dark, 9, 4))
+		b.add_theme_stylebox_override("pressed", make.call(UiTheme.with_alpha("btn_hover_bg", 0.95), accent, dark, 2, 1))
+		b.add_theme_stylebox_override("focus", make.call(UiTheme.with_alpha("btn_hover_bg", 0.95), accent, dark, 8, 4))
 	# locked / disabled buttons keep a visible, dim slab (skins gate grid)
 	if b is Button:
-		var dis: StyleBoxFlat = make.call(UiTheme.with_alpha("btn_bg", 0.42), UiTheme.c("panel_edge"))
+		var dis: StyleBoxFlat = make.call(UiTheme.with_alpha("btn_bg", 0.42), UiTheme.c("panel_edge"), Color(0, 0, 0, 0.0), 0, 0)
 		(b as Button).add_theme_stylebox_override("disabled", dis)
+	_add_sheen(b)
 	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	if b is Button and not _tb.has(b):
 		_tb.append(b)
 		(b as Button).set_meta("primary", primary)
+
+## Hairline "light catch" along the top edge — the cheapest convincing bevel:
+## reads as a polished material edge, never as a border. Idempotent because
+## apply_theme() re-styles every themed button on every theme switch.
+func _add_sheen(b: Control) -> void:
+	if b.has_node("Sheen"):
+		return
+	var line := ColorRect.new()
+	line.name = "Sheen"
+	line.color = Color(1.0, 1.0, 1.0, 0.07)
+	line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	line.anchor_right = 1.0
+	line.offset_left = 11
+	line.offset_right = -11
+	line.offset_top = 2
+	line.offset_bottom = 3
+	b.add_child(line)
 
 ## Apply a theme to EVERY themed control (menus, settings, HUD, panels,
 ## buttons, bars, popups, scrims). Called on boot and when the player switches

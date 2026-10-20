@@ -321,11 +321,14 @@ func _touch_test_run() -> void:
 		return
 	var vs := get_viewport().get_visible_rect().size
 	var wrap := func(a: float, b: float) -> float: return absf(wrapf(a - b, -PI, PI))
-	await get_tree().create_timer(0.5).timeout
+	# All waits are sim time (physics frames): the offscreen dev window can
+	# hitch for hundreds of ms on startup, and wall-clock windows measured a
+	# fraction of the intended steering time (flaky test, not a control bug).
+	await _frames(30)
 	var h0: float = p.heading
 	# 1) finger down right of center → steering rotation
 	_touch_tap(0, true, Vector2(vs.x * 0.72, vs.y * 0.5))
-	await get_tree().create_timer(0.85).timeout
+	await _frames(51)
 	var t1: float = wrap.call(p.heading, h0)
 	print("TOUCHTEST steer dt=%.3f %s" % [t1, "PASS" if t1 > 0.10 else "FAIL"])
 	var td := p.desired_dir
@@ -333,25 +336,28 @@ func _touch_test_run() -> void:
 	# 2) dead zone: second drag near center → desired_dir releases to center
 	var hz: float = p.heading
 	_touch_drag(0, Vector2(vs.x * 0.52, vs.y * 0.52))
-	await get_tree().create_timer(0.4).timeout
+	await _frames(24)
 	var drift: float = wrap.call(p.heading, hz)
 	print("TOUCHTEST deadzone drift=%.3f %s" % [drift, "PASS" if drift < 0.06 else "FAIL"])
 	# 3) second finger → boost
 	_touch_tap(1, true, Vector2(vs.x * 0.22, vs.y * 0.72))
-	await get_tree().create_timer(0.35).timeout
+	await _frames(21)
 	print("TOUCHTEST boost %s" % ("PASS" if p.input_boost else "FAIL"))
 	# 4) release second finger → boost off
 	_touch_tap(1, false, Vector2(vs.x * 0.22, vs.y * 0.72))
-	await get_tree().create_timer(0.35).timeout
+	await _frames(21)
 	print("TOUCHTEST boost-off %s" % ("PASS" if not p.input_boost else "FAIL"))
-	# 5) steer the other side → rotation continues (nonzero, opposite sign)
+	# 5) steer the other side → rotation resumes in the new direction. Measured
+	#    from the drag itself: at full sim speed a reversal can swing back
+	#    through the original heading, cancelling a start-to-end delta.
+	var h5: float = p.heading
 	_touch_drag(0, Vector2(vs.x * 0.28, vs.y * 0.5))
-	await get_tree().create_timer(0.85).timeout
-	var t5: float = wrapf(p.heading - h0, -PI, PI)
+	await _frames(51)
+	var t5: float = wrap.call(p.heading, h5)
 	print("TOUCHTEST steer-back dt=%.3f %s" % [absf(t5), "PASS" if absf(t5) > 0.10 else "FAIL"])
 	# cleanup + quit
 	_touch_tap(0, false, Vector2(vs.x * 0.28, vs.y * 0.5))
-	await get_tree().create_timer(0.2).timeout
+	await _frames(12)
 	_quit_nicely()
 
 # ---------------------------------------------------------------- skins QA
@@ -1306,11 +1312,13 @@ func _camera_2d_topdown(delta: float) -> void:
 	if vp != null and vp.get_visible_rect().size.y > 0.0:
 		aspect = vp.get_visible_rect().size.x / vp.get_visible_rect().size.y
 	# Gameplay camera distance (spec §9): the board was framed 30 m tall —
-	# snakes read as confetti at that scale. 22 m keeps the same key
-	# architecture (boost/growth easing, edge clamping) but puts the player
-	# ~36% closer; portrait gets a small multiplier so the board still fills
-	# the narrow screen without starving visibility.
-	var span := 22.0 * clampf(1.30 / maxf(aspect, 0.62), 1.0, 1.22)
+	# snakes read as confetti at that scale. Per-platform base: phones sit
+	# closer (≈55 px/m on a 1080p-landscape panel — the physical screen is
+	# smaller, so fruit/snake detail needs the extra scale); desktop keeps a
+	# slightly wider tactical frame. Portrait gets a multiplier so the narrow
+	# screen still fills without starving horizontal visibility.
+	var mobile := OS.get_name() == "Android" or OS.get_name() == "iOS"
+	var span := (19.5 if mobile else 20.5) * clampf(1.30 / maxf(aspect, 0.62), 1.0, 1.22)
 	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * maxf(Snake.BOOST_MULT - 1.0, 0.1)), 0.0, 1.0)
 	var length_k := clampf((p.length - 8.0) / 42.0, 0.0, 1.0)
 	span *= 1.0 + 0.08 * boost_k + 0.07 * length_k
@@ -1350,19 +1358,22 @@ func _camera_3d_tps(delta: float) -> void:
 	cam.projection = Camera3D.PROJECTION_PERSPECTIVE
 	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * (Snake.BOOST_MULT - 1.0)), 0.0, 1.0)
 	var len_k := clampf((p.length - 8.0) / 42.0, 0.0, 1.0)
-	var dist := 13.5 + len_k * 2.6
-	# camera sits south-east and high: a 3/4 view with real perspective depth
-	var back := Vector3(2.4, dist * 0.94, dist * 0.86)
+	var dist := 12.6 + len_k * 2.4
+	# low cinematic chase: ~22° pitch behind the serpent — the court stretches
+	# into a visible horizon with a sky band, objects occlude each other and
+	# the coiled body shows real volume. The compass yaw stays FIXED (see the
+	# orientation note above), so key/touch mapping is identical to 2D.
+	var back := Vector3(2.2, dist * 0.52, dist * 0.96)
 	# a short lead along the travel direction keeps the frame alive (it moves
 	# the look point, not the orientation, so key mapping stays exact)
 	var lead := Vector3(sin(p.heading), 0.0, cos(p.heading)) * minf(p.speed_cur * 0.20, 2.4)
 	var focus := head + Vector3.UP * 0.9
 	_cam_pos = _cam_pos.lerp(focus + back, 1.0 - exp(-6.0 * delta))
-	var look := focus + Vector3(0.0, 0.0, -2.4) + lead
+	var look := focus + Vector3(0.0, 0.55, -3.2) + lead
 	_cam_look = _cam_look.lerp(look, 1.0 - exp(-6.0 * delta))
 	cam.global_position = _cam_pos
 	cam.look_at(_cam_look, Vector3.UP)
-	cam.fov = lerpf(cam.fov, 60.0 + boost_k * 8.0, 1.0 - exp(-6.0 * delta))
+	cam.fov = lerpf(cam.fov, 62.0 + boost_k * 8.0, 1.0 - exp(-6.0 * delta))
 
 func _topdown_fit() -> void:
 	# 2D board height for the current aspect — the follow camera needs no
@@ -1382,8 +1393,10 @@ func _notification(what: int) -> void:
 		_quit_nicely()
 	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_APPLICATION_PAUSED:
 		# backgrounded (phone app switch / screen off): never let the match
-		# keep running unattended — auto-pause and show the overlay (spec §3)
-		if state == State.PLAYING:
+		# keep running unattended — auto-pause and show the overlay (spec §3).
+		# Dev harness windows run parked offscreen and randomly receive
+		# focus-out events; freezing the sim mid-QA produced false failures.
+		if state == State.PLAYING and not _autoplay:
 			_pause()
 	elif what == NOTIFICATION_WM_GO_BACK_REQUEST:
 		# Android BACK (quit_on_go_back=false): pause in a match, otherwise
