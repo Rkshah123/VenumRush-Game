@@ -43,8 +43,16 @@ var _minimap: ArenaMinimap = null
 var _boost_panel: PanelContainer = null
 var _menu_column: VBoxContainer = null
 var _safe_tick := -1
+# On-device perf probe (dev): tiny fps/count line revealed by perf_probe(),
+# positioned clear of the pause button, radar and joystick.
+var _perf_probe: Label = null
+var _perf_world = null
 var _opt_selected: Button = null
 var _page := "main"
+var _menu_land := true            # cached orientation of the last menu build
+var _play_btn: Button = null      # hero action: gentle live pulse
+var _rec_best_lab: Label = null   # personal records in the brand block
+var _rec_len_lab: Label = null
 var _pause_panel: PanelContainer
 var _over_panel: PanelContainer
 var _over_title: Label
@@ -125,6 +133,13 @@ func _build_gameplay() -> void:
 	timer_label = _mk_label("0:00", 15, "dim", hrow)
 	kills_label = _mk_label("KILLS 0", 15, "text", hrow)
 	gameplay_group.add_child(top)
+	# dev perf probe (hidden by default): fps + entity counts for the build
+	# probe APK; revealed only by perf_probe() from Game.start_play. Attached
+	# to root so it stays observable across the pause/death overlays.
+	_perf_probe = _mk_label("", 20, "dim", root)
+	_perf_probe.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_perf_probe.position = Vector2(16, 116)
+	_perf_probe.visible = false
 
 	# whole-arena radar, top-right (reference-frame idea: the whole board at a
 	# glance). Lives in the gameplay layer; pause button moved to the top-left.
@@ -463,15 +478,34 @@ func announce(title: String, sub: String = "") -> void:
 # ---------------------------------------------------------------- menu
 
 func _build_menu() -> void:
+	# FULL-SCREEN mobile-first menu (no centered card): the whole viewport is
+	# the title screen over the dedicated MenuWorld cinematic scene — the
+	# gameplay arena is never behind it. Brand block up top, big tappable
+	# actions anchored low (portrait) or brand-left / actions-right
+	# (landscape + desktop). A top→bottom scrim keeps labels readable.
+	if menu_group != null and is_instance_valid(menu_group):
+		menu_group.queue_free()
+	menu_group = null
+	_menu_main = null
+	_menu_settings = null
+	_menu_skins = null
+	_menu_help = null
+	_menu_logo = null
+	_menu_title = null
+	_play_btn = null
+	_rec_best_lab = null
+	_rec_len_lab = null
+
+	_ui_s = _ui_scale()
+	var vs := get_viewport().get_visible_rect().size
+	var land: bool = vs.x >= vs.y
+	_menu_land = land
+
 	menu_group = Control.new()
 	menu_group.set_anchors_preset(Control.PRESET_FULL_RECT)
 	menu_group.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(menu_group)
 
-	_ui_s = _ui_scale()
-
-	# FULL-SCREEN menu: the whole viewport is the title screen. A soft radial
-	# scrim keeps the live arena readable behind the centered hero column.
 	_menu_scrim = TextureRect.new()
 	_menu_scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_menu_scrim.stretch_mode = TextureRect.STRETCH_SCALE
@@ -479,132 +513,237 @@ func _build_menu() -> void:
 	menu_group.add_child(_menu_scrim)
 	_rebuild_menu_scrim()
 
-	# Centered hero column: logo, title, arena + mode pickers, actions.
-	var hero_wrap := CenterContainer.new()
-	hero_wrap.set_anchors_preset(Control.PRESET_FULL_RECT)
-	hero_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	menu_group.add_child(hero_wrap)
-	var vroot := VBoxContainer.new()
-	vroot.alignment = BoxContainer.ALIGNMENT_CENTER
-	vroot.add_theme_constant_override("separation", int(9 * _ui_s))
-	vroot.custom_minimum_size = Vector2(420 * _ui_s, 0)
-	vroot.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hero_wrap.add_child(vroot)
-	_menu_column = vroot
+	# One full-bleed page column with breathing margins from the safe area.
+	_menu_column = VBoxContainer.new()
+	_menu_column.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_menu_column.add_theme_constant_override("separation", int(6 * _ui_s))
+	_menu_column.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	menu_group.add_child(_menu_column)
+	var m_side := maxf(18.0, vs.x * (0.075 if land else 0.06))
+	_menu_column.offset_left = m_side
+	_menu_column.offset_right = -m_side
+	_menu_column.offset_top = maxf(14.0, vs.y * (0.03 if land else 0.04))
+	_menu_column.offset_bottom = maxf(14.0, vs.y * (0.045 if land else 0.05))
 
+	# ---------------------------------------------------------- brand block
+	var brand := VBoxContainer.new()
+	brand.add_theme_constant_override("separation", int(6 * _ui_s))
+	brand.alignment = BoxContainer.ALIGNMENT_CENTER
 	var logo := TextureRect.new()
 	logo.texture = load("res://icon.png")
 	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	logo.custom_minimum_size = Vector2(150 * _ui_s, 150 * _ui_s)
+	var logo_px := (104.0 if land else 128.0) * _ui_s
+	logo.custom_minimum_size = Vector2(logo_px, logo_px)
 	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vroot.add_child(logo)
+	brand.add_child(logo)
 	_menu_logo = logo
-
-	_menu_title = _mk_label("SERPENTIS 3D", int(46 * _ui_s), "accent", vroot)
-	_menu_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_menu_title.add_theme_color_override("font_shadow_color", UiTheme.c("title_shadow"))
-	_menu_title.add_theme_constant_override("shadow_offset_y", 4)
-	var tag := _mk_label("Evolve. Hunt. Dominate.", int(16 * _ui_s), "dim", vroot)
+	var title := _mk_label("SERPENTIS 3D", int((42 if land else 48) * _ui_s), "accent", brand)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_color_override("font_shadow_color", UiTheme.c("title_shadow"))
+	title.add_theme_constant_override("shadow_offset_y", 4)
+	_menu_title = title
+	var tag := _mk_label("Evolve. Hunt. Dominate.", int(16 * _ui_s), "dim", brand)
 	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	# personal records: quiet identity line under the tagline
+	var rec := HBoxContainer.new()
+	rec.alignment = BoxContainer.ALIGNMENT_CENTER
+	rec.add_theme_constant_override("separation", 14)
+	brand.add_child(rec)
+	_rec_best_lab = _mk_label("", int(15 * _ui_s), "accent", rec)
+	_rec_len_lab = _mk_label("", int(15 * _ui_s), "dim", rec)
+	_refresh_records()
 
+	# ---------------------------------------------------------- action stack
+	var act := VBoxContainer.new()
+	act.add_theme_constant_override("separation", int(9 * _ui_s))
 	_menu_main = VBoxContainer.new()
 	_menu_main.add_theme_constant_override("separation", int(9 * _ui_s))
-	vroot.add_child(_menu_main)
-	# ARENA selector — live-swaps the 3D world behind the menu
-	var arena_tag := _mk_label("ARENA", int(12 * _ui_s), "dim", _menu_main)
-	arena_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	var arow := HBoxContainer.new()
-	arow.alignment = BoxContainer.ALIGNMENT_CENTER
-	arow.add_theme_constant_override("separation", 6)
-	_menu_main.add_child(arow)
-	var prev_b := _nav_button("◄")
-	prev_b.pressed.connect(func(): AudioMgr.play("click"); arena_shift.emit(-1))
-	arow.add_child(prev_b)
-	_arena_label = _mk_label("VERDANT VALLEY", int(15 * _ui_s), "accent", arow)
-	_arena_label.custom_minimum_size = Vector2(200 * _ui_s, 40 * _ui_s)
-	_arena_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_arena_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	var next_b := _nav_button("►")
-	next_b.pressed.connect(func(): AudioMgr.play("click"); arena_shift.emit(1))
-	arow.add_child(next_b)
-	# quick graphics-mode selector right on the title screen (settings also
-	# carries the full 2D / 3D selector). Tapping a mode SELECTS it.
-	var mode_tag := _mk_label("MODE", int(11 * _ui_s), "dim", _menu_main)
-	mode_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	var mrow := HBoxContainer.new()
-	mrow.alignment = BoxContainer.ALIGNMENT_CENTER
-	mrow.add_theme_constant_override("separation", 8)
-	_menu_main.add_child(mrow)
-	_option_button(mrow, "2D TOP-DOWN", "gfx_mode", 0, func(): _set_mode(0))
-	_option_button(mrow, "3D TPS", "gfx_mode", 1, func(): _set_mode(1))
-	_menu_button(_menu_main, "PLAY", func(): play_pressed.emit(), true)
+	act.add_child(_menu_main)
+	# dominant primary + full-width secondary actions (spec section 3)
+	_play_btn = _menu_button(_menu_main, "PLAY", func(): play_pressed.emit(), true)
 	_menu_button(_menu_main, "SNAKES", func(): _menu_page("skins"))
 	_menu_button(_menu_main, "HOW TO PLAY", func(): _menu_page("help"))
 	_menu_button(_menu_main, "SETTINGS", func(): _swap_menu(false))
 	_menu_button(_menu_main, "QUIT", func(): quit_pressed.emit())
-	# quick sound toggle right on the title screen (settings keeps the slider)
-	var srow := HBoxContainer.new()
-	srow.alignment = BoxContainer.ALIGNMENT_CENTER
-	srow.add_theme_constant_override("separation", 8)
-	_menu_main.add_child(srow)
-	_option_button(srow, "SOUND ON", "muted", 0, func(): _set_muted(0))
-	_option_button(srow, "SOUND OFF", "muted", 1, func(): _set_muted(1))
-	var hint := _mk_label("", int(12 * _ui_s), "dim", vroot)
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	hint.text = "mouse steers, LMB boosts" if not OS.has_feature("android") else "drag steers, 2nd finger boosts"
-	hint.text = "OFFLINE BUILD v0.1 - " + hint.text
+	if land:
+		# compact selector strip: arena pager + mode + sound side by side
+		var q1 := HBoxContainer.new()
+		q1.alignment = BoxContainer.ALIGNMENT_CENTER
+		q1.add_theme_constant_override("separation", 6)
+		_menu_main.add_child(q1)
+		_arena_row_into(q1, true)
+		var q2 := HBoxContainer.new()
+		q2.alignment = BoxContainer.ALIGNMENT_CENTER
+		q2.add_theme_constant_override("separation", 8)
+		_menu_main.add_child(q2)
+		_option_button(q2, "2D", "gfx_mode", 0, func(): _set_mode(0))
+		_option_button(q2, "3D", "gfx_mode", 1, func(): _set_mode(1))
+		_option_button(q2, "SOUND ON", "muted", 0, func(): _set_muted(0))
+		_option_button(q2, "SOUND OFF", "muted", 1, func(): _set_muted(1))
+		var kids := q2.get_children()
+		for k: Button in kids:
+			k.custom_minimum_size = Vector2(0, 46.0 * _ui_s)
+			k.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var hint := _mk_label("", int(12 * _ui_s), "dim", _menu_main)
+		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		hint.text = "mouse steers, LMB boosts" if not _is_touch_device() else "drag steers, 2nd finger boosts"
+		hint.text = "OFFLINE BUILD v0.1 - " + hint.text
+	else:
+		# portrait: labelled selector rows, generous spacing
+		var arena_tag := _mk_label("ARENA", int(12 * _ui_s), "dim", _menu_main)
+		arena_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_arena_row_into(_menu_main, false)
+		var mode_tag := _mk_label("MODE", int(11 * _ui_s), "dim", _menu_main)
+		mode_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		var mrow := HBoxContainer.new()
+		mrow.alignment = BoxContainer.ALIGNMENT_CENTER
+		mrow.add_theme_constant_override("separation", 8)
+		_menu_main.add_child(mrow)
+		_option_button(mrow, "2D TOP-DOWN", "gfx_mode", 0, func(): _set_mode(0))
+		_option_button(mrow, "3D TPS", "gfx_mode", 1, func(): _set_mode(1))
+		var srow := HBoxContainer.new()
+		srow.alignment = BoxContainer.ALIGNMENT_CENTER
+		srow.add_theme_constant_override("separation", 8)
+		_menu_main.add_child(srow)
+		_option_button(srow, "SOUND ON", "muted", 0, func(): _set_muted(0))
+		_option_button(srow, "SOUND OFF", "muted", 1, func(): _set_muted(1))
+		var hint := _mk_label("", int(12 * _ui_s), "dim", _menu_main)
+		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		hint.text = "mouse steers, LMB boosts" if not _is_touch_device() else "drag steers, 2nd finger boosts"
+		hint.text = "OFFLINE BUILD v0.1 - " + hint.text
 
+	# ---------------------------------------------------------- orientation
+	# The action column sits on a soft themed card so every page — SNAKES, HOW
+	# TO PLAY, SETTINGS included — stays readable while the animated scene
+	# runs behind, and the main stack gains a clean slab look.
+	var act_card := PanelContainer.new()
+	var act_sb := _panel_style(0.55)
+	act_sb.set_corner_radius_all(18)
+	act_sb.content_margin_left = 14
+	act_sb.content_margin_right = 14
+	act_sb.content_margin_top = 12
+	act_sb.content_margin_bottom = 14
+	act_card.add_theme_stylebox_override("panel", act_sb)
+	if not _tpanels.has(act_sb):
+		_tpanels.append(act_sb)
+		act_sb.set_meta("alpha", 0.55)
+	act_card.add_child(act)
+
+	if land:
+		var page := HBoxContainer.new()
+		page.add_theme_constant_override("separation", int(24 * _ui_s))
+		_menu_column.add_child(page)
+		brand.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		brand.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		page.add_child(brand)
+		page.add_child(act_card)
+		act_card.custom_minimum_size = Vector2(clampf(vs.x * 0.46, 380.0 * _ui_s, 740.0), 0.0)
+		act_card.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	else:
+		_menu_column.add_child(brand)
+		var spacer := Control.new()
+		spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_menu_column.add_child(spacer)
+		_menu_column.add_child(act_card)
+
+	_build_settings_page(act)
+	_build_help_menu(act)
+	_build_skins_menu(act)
+	_menu_skins.visible = false
+	_menu_page(_page)
+	call_deferred("_animate_menu_intro")
+
+func _build_settings_page(act: Container) -> void:
 	_menu_settings = VBoxContainer.new()
 	_menu_settings.add_theme_constant_override("separation", int(9 * _ui_s))
-	vroot.add_child(_menu_settings)
+	act.add_child(_menu_settings)
 	_menu_settings.visible = false
-	var svl := _mk_label("MASTER VOLUME", int(13 * _ui_s), "dim", _menu_settings)
+	var svl := _mk_label("MASTER VOLUME", int(15 * _ui_s), "dim", _menu_settings)
 	var slider := HSlider.new()
 	slider.min_value = 0.0
 	slider.max_value = 1.0
 	slider.step = 0.05
 	slider.value = float(SaveMgr.get_value("master_volume", 0.85))
-	slider.custom_minimum_size = Vector2(300 * _ui_s, 20 * _ui_s)
+	slider.custom_minimum_size = Vector2(0, int(34 * _ui_s))
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	slider.value_changed.connect(func(v): AudioMgr.set_master_volume(v))
 	_menu_settings.add_child(slider)
-	var full := CheckBox.new()
-	full.text = "FULLSCREEN"
-	full.button_pressed = bool(SaveMgr.get_value("fullscreen", false))
-	_style_button(full)
-	full.pressed.connect(func():
-		var on := not bool(SaveMgr.get_value("fullscreen", false))
-		SaveMgr.set_value("fullscreen", on)
-		var ds := DisplayServer.window_get_current_screen()
-		if on:
-			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
-		else:
-			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
-	)
-	_menu_settings.add_child(full)
-
-	# THEME selector (Dark Theme) — applies instantly across UI + arenas
-	_mk_label("THEME", int(13 * _ui_s), "dim", _menu_settings)
+	if not _is_touch_device():
+		var full := CheckBox.new()
+		full.text = "FULLSCREEN"
+		full.button_pressed = bool(SaveMgr.get_value("fullscreen", false))
+		_style_button(full)
+		full.add_theme_font_size_override("font_size", int(16 * _ui_s))
+		full.pressed.connect(func():
+			var on := not bool(SaveMgr.get_value("fullscreen", false))
+			SaveMgr.set_value("fullscreen", on)
+			if on:
+				DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+			else:
+				DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+		)
+		_menu_settings.add_child(full)
+	var thl := _mk_label("THEME", int(15 * _ui_s), "dim", _menu_settings)
 	var trow := HBoxContainer.new()
+	trow.alignment = BoxContainer.ALIGNMENT_CENTER
 	trow.add_theme_constant_override("separation", 8)
 	_menu_settings.add_child(trow)
 	for t in UiTheme.NAMES.size():
 		var tid := t
 		_option_button(trow, str(UiTheme.NAMES[tid]), "theme", tid, func(): _set_theme(tid))
-
-	# GRAPHICS MODE selector — 2D top-down vs 3D TPS (direct selection)
-	_mk_label("GRAPHICS MODE", int(13 * _ui_s), "dim", _menu_settings)
+	var gml := _mk_label("GRAPHICS MODE", int(15 * _ui_s), "dim", _menu_settings)
 	var grow := HBoxContainer.new()
+	grow.alignment = BoxContainer.ALIGNMENT_CENTER
 	grow.add_theme_constant_override("separation", 8)
 	_menu_settings.add_child(grow)
 	_option_button(grow, "2D TOP-DOWN", "gfx_mode", 0, func(): _set_mode(0))
 	_option_button(grow, "3D TPS", "gfx_mode", 1, func(): _set_mode(1))
-
 	_menu_button(_menu_settings, "BACK", func(): _swap_menu(true))
-	_build_help_menu(vroot)
-	_build_skins_menu(vroot)
-	_menu_skins.visible = false
-	call_deferred("_animate_menu_intro")
+
+func _arena_row_into(row: Container, compact: bool) -> void:
+	# ◄ VERDANT VALLEY ► pager; compact variant used by the landscape strip.
+	# VBoxes get an inner HBox so the three controls always share one row.
+	var wrap: Container = row
+	if row is VBoxContainer:
+		var hb := HBoxContainer.new()
+		hb.alignment = BoxContainer.ALIGNMENT_CENTER
+		hb.add_theme_constant_override("separation", 6)
+		row.add_child(hb)
+		wrap = hb
+	var prev_b := _nav_button("◄")
+	prev_b.pressed.connect(func(): AudioMgr.play("click"); arena_shift.emit(-1))
+	wrap.add_child(prev_b)
+	_arena_label = _mk_label("VERDANT VALLEY", int((13 if compact else 15) * _ui_s), "accent", wrap)
+	_arena_label.custom_minimum_size = Vector2((150 if compact else 200) * _ui_s, (44 if not compact else 40) * _ui_s)
+	_arena_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_arena_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	var next_b := _nav_button("►")
+	next_b.pressed.connect(func(): AudioMgr.play("click"); arena_shift.emit(1))
+	wrap.add_child(next_b)
+
+func _refresh_records() -> void:
+	# identity line under the tagline: personal bests from the save file
+	if _rec_best_lab == null or not is_instance_valid(_rec_best_lab):
+		return
+	var best := int(SaveMgr.get_value("best_score", 0))
+	var blen := float(SaveMgr.get_value("best_length", 0.0))
+	if best <= 0:
+		_rec_best_lab.text = ""
+		_rec_len_lab.text = ""
+	else:
+		_rec_best_lab.text = "BEST %d" % best
+		_rec_len_lab.text = "TOP LENGTH %d" % int(round(blen))
+
+func _ensure_menu_layout() -> void:
+	# rotations happen while hidden (in-game); rebuild the page for the new
+	# orientation the moment the menu comes back (or while visible)
+	if menu_group == null or not is_instance_valid(menu_group) or not menu_group.visible:
+		return
+	var vs := get_viewport().get_visible_rect().size
+	if (vs.x >= vs.y) != _menu_land:
+		_build_menu()   # rebuild keeps the active page and replays the intro
 
 func _set_theme(id: int) -> void:
 	SaveMgr.set_value("theme", id)
@@ -635,11 +774,11 @@ func _set_muted(on_off: int) -> void:
 
 func _build_help_menu(vroot: Container) -> void:
 	_menu_help = VBoxContainer.new()
-	_menu_help.add_theme_constant_override("separation", int(8 * _ui_s))
-	_menu_help.custom_minimum_size = Vector2(420 * _ui_s, 0)
+	_menu_help.add_theme_constant_override("separation", int(10 * _ui_s))
+	_menu_help.custom_minimum_size = Vector2(0, 0)
 	vroot.add_child(_menu_help)
 	_menu_help.visible = false
-	var h := _mk_label("HOW TO PLAY", int(24 * _ui_s), "accent", _menu_help)
+	var h := _mk_label("HOW TO PLAY", int(30 * _ui_s), "accent", _menu_help)
 	h.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	var rows := [
 		["GOAL", "Eat fruit to grow. Cut rivals by ramming their body."],
@@ -653,9 +792,11 @@ func _build_help_menu(vroot: Container) -> void:
 		rows.append(["CONTROLS", "Move the mouse to steer - the snake follows it."])
 		rows.append(["BOOST", "Hold Left Mouse or SPACE to sprint."])
 	for r in rows:
-		var line := _mk_label("%s   %s" % [r[0], r[1]], int(13 * _ui_s), "dim", _menu_help)
+		var panel := PanelContainer.new()
+		panel.add_theme_stylebox_override("panel", _panel_style(0.35))
+		var line := _mk_label("%s   %s" % [r[0], r[1]], int(17 * _ui_s), "dim", panel)
 		line.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		line.custom_minimum_size = Vector2(400 * _ui_s, 0)
+		_menu_help.add_child(panel)
 	_menu_button(_menu_help, "BACK", func(): _menu_page("main"))
 
 # ---------------------------------------------------------------- intro anim
@@ -716,14 +857,17 @@ func _menu_page(page: String) -> void:
 
 func _build_skins_menu(vroot: Container) -> void:
 	_menu_skins = VBoxContainer.new()
-	_menu_skins.add_theme_constant_override("separation", 8)
+	_menu_skins.add_theme_constant_override("separation", 10)
 	vroot.add_child(_menu_skins)
-	_mk_label("CHOOSE YOUR SERPENT", 20, "accent", _menu_skins)
+	var st := _mk_label("CHOOSE YOUR SERPENT", int(26 * _ui_s), "accent", _menu_skins)
+	st.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
-	# live 3D preview: a real Snake slithering in a small viewport
+	# live 3D preview: a real Snake slithering in a small viewport — full
+	# menu column width and tall enough to read the head + scale detail
 	var pv := SubViewportContainer.new()
 	pv.stretch = true
-	pv.custom_minimum_size = Vector2(360, 190)
+	pv.custom_minimum_size = Vector2(0, 240 * _ui_s)
+	pv.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var frame := PanelContainer.new()
 	frame.add_theme_stylebox_override("panel", _panel_style(0.55))
 	frame.add_child(pv)
@@ -752,7 +896,7 @@ func _build_skins_menu(vroot: Container) -> void:
 	vp.add_child(_preview_cam)
 	_preview_snake = _PreviewSnake.new()
 	vp.add_child(_preview_snake)
-	_preview_snake.spawn(Vector3.ZERO, Vector3(0, 0, 1), 9.0)
+	_preview_snake.spawn(Vector3.ZERO, Vector3(0, 0, 1), 6.0)
 	_preview_snake.set_physics_process(false)   # starts when the skins page opens
 	var cur := int(SaveMgr.get_value("skin", 0))
 	var sk0 := SkinCatalog.get_skin(cur)
@@ -762,12 +906,13 @@ func _build_skins_menu(vroot: Container) -> void:
 	var grid := GridContainer.new()
 	grid.columns = 2
 	grid.add_theme_constant_override("h_separation", 10)
-	grid.add_theme_constant_override("v_separation", 6)
+	grid.add_theme_constant_override("v_separation", 8)
 	_menu_skins.add_child(grid)
 	for i in SkinCatalog.count():
 		var b := _menu_button(grid, "", func(): _pick_skin(i))
-		b.custom_minimum_size = Vector2(225 * _ui_s, 38 * _ui_s)
-		b.add_theme_font_size_override("font_size", int(15 * _ui_s))
+		b.custom_minimum_size = Vector2(296 * _ui_s, 52 * _ui_s)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.add_theme_font_size_override("font_size", int(18 * _ui_s))
 		_skin_buttons.append(b)
 	_refresh_skin_buttons()
 	_menu_button(_menu_skins, "BACK", func(): _swap_menu(true))
@@ -809,11 +954,40 @@ func _process(delta: float) -> void:
 	# slow breathing pulse on the menu title (ambient life on the start screen)
 	if menu_group != null and menu_group.visible and _menu_title != null and is_instance_valid(_menu_title):
 		_menu_title.modulate.a = 0.92 + 0.08 * sin(Time.get_ticks_msec() * 0.0016)
+	# hero PLAY action: gentle alpha heartbeat (no transform churn)
+	if menu_group != null and menu_group.visible and _play_btn != null and is_instance_valid(_play_btn):
+		_play_btn.self_modulate.a = 0.94 + 0.06 * sin(Time.get_ticks_msec() * 0.0042)
 	if _menu_skins != null and _menu_skins.visible and _preview_snake != null and _preview_vp != null:
-		var target: Vector3 = _preview_snake.head_pos + Vector3.UP * 0.6
+		var target: Vector3 = _preview_snake.head_pos + Vector3.UP * 0.9
 		_preview_yaw += delta * 0.7
-		_preview_cam.position = target + Vector3(sin(_preview_yaw) * 4.4, 2.2, cos(_preview_yaw) * 4.4)
+		_preview_cam.position = target + Vector3(sin(_preview_yaw) * 3.7, 2.4, cos(_preview_yaw) * 3.7)
 		_preview_cam.look_at(target)
+	# on-device perf readout (probe builds only): read every 0.5 s
+	if _perf_probe != null and _perf_probe.visible:
+		if is_instance_valid(_perf_world):
+			if _safe_tick != _perf_probe.get_meta("tick", -1):
+				_perf_probe.set_meta("tick", _safe_tick)
+				var txt := "fps %d · phy %.1f · proc %.1f" % [
+					Engine.get_frames_per_second(),
+					Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
+					Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0]
+				if "food" in _perf_world:
+					txt += " · sn %d · orbs %d" % [
+						_perf_world.snake_count(), _perf_world.food.count_alive()]
+				else:
+					txt += " · menu"
+				_perf_probe.text = txt
+		else:
+			_perf_probe.visible = false
+
+## Reveal/refresh the on-device perf probe (probe APK only).
+func perf_probe(on: bool, world) -> void:
+	if _perf_probe == null:
+		return
+	_perf_world = world
+	_perf_probe.visible = on
+	if not on:
+		_perf_world = null
 
 class _PreviewSnake extends Snake:
 	# menu preview: glides in a continuous circle so the skin reads from all sides
@@ -828,6 +1002,10 @@ func set_arena(key: String) -> void:
 func show_menu(v: bool) -> void:
 	menu_group.visible = v
 	overlay_group.visible = false if v else overlay_group.visible
+	if v:
+		_refresh_records()
+		_ensure_menu_layout()   # orientation may have flipped while hidden
+		call_deferred("_fit_menu_column")
 
 # ---------------------------------------------------------------- pause
 
@@ -849,6 +1027,7 @@ func _build_pause() -> void:
 	overlay_group.add_child(_pause_panel)
 	var p := VBoxContainer.new()
 	p.add_theme_constant_override("separation", 10)
+	p.custom_minimum_size = Vector2(380 * _ui_scale(), 0)   # wide tappable rows
 	_pause_panel.add_child(p)
 	_mk_label("PAUSED", 44, "text", p)
 	_menu_button(p, "RESUME", func(): resume_pressed.emit())
@@ -903,6 +1082,7 @@ func _build_gameover() -> void:
 	overlay_group.add_child(_over_panel)
 	var p := VBoxContainer.new()
 	p.add_theme_constant_override("separation", 10)
+	p.custom_minimum_size = Vector2(380 * _ui_scale(), 0)   # wide tappable rows
 	_over_panel.add_child(p)
 	_over_title = _mk_label("ELIMINATED", 52, "warn", p)
 	_over_lines = _mk_label("", 18, "text", p)
@@ -1009,6 +1189,7 @@ func _apply_safe_area() -> void:
 	root.offset_right = -minf(right, vs.x * 0.08)
 	root.offset_bottom = -minf(bottom, vs.y * 0.08)
 	_refresh_joystick_layout()
+	_ensure_menu_layout()   # portrait <-> landscape flips rebuild the page
 	call_deferred("_fit_menu_column")
 
 func _ui_scale() -> float:
@@ -1056,9 +1237,9 @@ func _mk_label(text: String, size: int, role_or_color: Variant, parent: Node = n
 func _nav_button(text: String) -> Button:
 	var b := Button.new()
 	b.text = text
-	b.custom_minimum_size = Vector2(44 * _ui_s, 40 * _ui_s)
+	b.custom_minimum_size = Vector2(50 * _ui_s, 46 * _ui_s)
 	_style_button(b)
-	b.add_theme_font_size_override("font_size", int(20 * _ui_s))
+	b.add_theme_font_size_override("font_size", int(22 * _ui_s))
 	b.add_theme_color_override("font_color", UiTheme.c("text"))
 	b.add_theme_color_override("font_hover_color", UiTheme.c("accent"))
 	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -1069,11 +1250,13 @@ func _menu_button(parent: Node, text: String, on_press: Callable, primary: bool 
 	b.text = text
 	# never take keyboard focus: focused buttons swallow arrow keys during play
 	b.focus_mode = Control.FOCUS_NONE
-	# mobile-first touch targets: 54 px rows / 74 px primary (spec section 4)
+	# mobile-first touch targets: ~60 px rows / ~76 px primary, stretched to
+	# the FULL menu column width — buttons fill the page, no narrow card look
 	var mob := _is_touch_device()
-	var row_h := (72 if primary else 54) if mob else (62 if primary else 44)
-	var fs := (27 if primary else 21) if mob else (26 if primary else 20)
-	b.custom_minimum_size = Vector2((340 if mob else 320) * _ui_s, row_h * _ui_s)
+	var row_h := (76 if primary else 60) if mob else (68 if primary else 54)
+	var fs := 27 if primary else 20
+	b.custom_minimum_size = Vector2(0, row_h * _ui_s)
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_style_button(b, primary)
 	b.add_theme_font_size_override("font_size", int(fs * _ui_s))
 	b.add_theme_color_override("font_color", UiTheme.c("panel_bg") if primary else UiTheme.c("text"))
@@ -1086,8 +1269,8 @@ func _menu_button(parent: Node, text: String, on_press: Callable, primary: bool 
 	if not _tb.has(b):
 		_tb.append(b)
 		b.set_meta("primary", primary)
-	# micro hover / press motion (spec §5/§9)
 	b.pivot_offset = b.custom_minimum_size * 0.5
+	# micro hover / press motion (spec §5/§9)
 	b.mouse_entered.connect(func():
 		var tw := b.create_tween()
 		tw.tween_property(b, "scale", Vector2(1.03, 1.03), 0.10).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
@@ -1106,8 +1289,8 @@ func _option_button(parent: Node, text: String, group: String, value: int, on_pr
 	# settings/title selector button; tapping ALWAYS selects THIS value (never
 	# a toggle) and the active one is marked with a pulsing check (spec §1)
 	var b := _menu_button(parent, text, on_press)
-	b.custom_minimum_size = Vector2((180 if _is_touch_device() else 168) * _ui_s, (48 if _is_touch_device() else 40) * _ui_s)
-	b.add_theme_font_size_override("font_size", int((17 if _is_touch_device() else 15) * _ui_s))
+	b.custom_minimum_size = Vector2((180 if _is_touch_device() else 164) * _ui_s, (48 if _is_touch_device() else 44) * _ui_s)
+	b.add_theme_font_size_override("font_size", int(16 * _ui_s))
 	b.set_meta("opt_group", group)
 	b.set_meta("opt_value", value)
 	b.set_meta("opt_text", text)
@@ -1167,6 +1350,10 @@ func _style_button(b: Control, primary: bool = false) -> void:
 		b.add_theme_stylebox_override("hover", make.call(UiTheme.with_alpha("btn_hover_bg", 0.95), accent))
 		b.add_theme_stylebox_override("pressed", make.call(UiTheme.with_alpha("btn_hover_bg", 0.95), accent))
 		b.add_theme_stylebox_override("focus", make.call(UiTheme.with_alpha("btn_hover_bg", 0.95), accent))
+	# locked / disabled buttons keep a visible, dim slab (skins gate grid)
+	if b is Button:
+		var dis: StyleBoxFlat = make.call(UiTheme.with_alpha("btn_bg", 0.42), UiTheme.c("panel_edge"))
+		(b as Button).add_theme_stylebox_override("disabled", dis)
 	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	if b is Button and not _tb.has(b):
 		_tb.append(b)
@@ -1235,22 +1422,24 @@ func _bar_bg() -> StyleBoxFlat:
 	return sb
 
 func _rebuild_menu_scrim() -> void:
-	# radial vignette scrim — the live arena stays visible around the centered
-	# hero column but the middle stays readable in every theme
+	# FULL-SCREEN menu scrim: a vertical gradient that lets the cinematic
+	# snake scene shine in the upper half while deepening toward the bottom
+	# so the big action buttons keep strong contrast in every theme.
 	if _menu_scrim == null or not is_instance_valid(_menu_scrim):
 		return
 	var base := UiTheme.c("menu_scrim")
 	var g := Gradient.new()
-	g.offsets = PackedFloat32Array([0.0, 0.55, 1.0])
+	g.offsets = PackedFloat32Array([0.0, 0.42, 0.72, 1.0])
 	g.colors = PackedColorArray([
+		UiTheme.with_alpha("menu_scrim", base.a * 0.34),
 		UiTheme.with_alpha("menu_scrim", base.a * 0.55),
-		UiTheme.with_alpha("menu_scrim", base.a * 0.72),
-		base])
+		UiTheme.with_alpha("menu_scrim", base.a * 0.74),
+		UiTheme.with_alpha("menu_scrim", base.a * 0.92)])
 	var tex := GradientTexture2D.new()
 	tex.gradient = g
-	tex.width = 256
-	tex.height = 256
-	tex.fill = GradientTexture2D.FILL_RADIAL
-	tex.fill_from = Vector2(0.5, 0.5)
-	tex.fill_to = Vector2(1.0, 0.5)
+	tex.width = 64
+	tex.height = 512
+	tex.fill = GradientTexture2D.FILL_LINEAR
+	tex.fill_from = Vector2(0.5, 0.0)
+	tex.fill_to = Vector2(0.5, 1.0)
 	_menu_scrim.texture = tex

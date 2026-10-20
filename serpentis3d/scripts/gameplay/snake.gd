@@ -58,6 +58,7 @@ var ability_left := 0.0
 var _ability_dur := 1.0
 var _halo: MeshInstance3D
 var _skin_mats: Array = []   # [StandardMaterial3D, snout_flavor: bool] — head parts that recolor on apply_skin
+var _dark_mats: Array[StandardMaterial3D] = []   # crown/dorsal-darker parts, retinted with darkened dorsal
 
 # Steering contract for subclasses:
 var desired_dir := Vector3(0, 0, 1)
@@ -71,6 +72,7 @@ var match_world = null
 var body_mi: MeshInstance3D
 var _mat: ShaderMaterial
 var _tex: ImageTexture
+var _spine_img: Image = null   # reused upload buffer (allocated once)
 var _spine := PackedFloat32Array()   # RING_COUNT*4 floats
 var _raw := PackedVector3Array()     # RING_COUNT station source points
 var _perp := PackedVector3Array()    # lateral direction per station
@@ -212,6 +214,12 @@ func _physics_process(delta: float) -> void:
 
 	wave_phase += speed_cur * delta * 0.95
 
+	_spine_tick += 1
+	if spine_stride > 1 and not spine_full_rate and _spine_tick % spine_stride != 0:
+		return
+	# Off-player serpents on the phone tier rebuild+upload the spine tube at
+	# half rate (the rebuild is the single largest sim cost); the trail history
+	# and steering stay at the full rate so gameplay behavior is unchanged.
 	_update_spine(delta)
 	_length_animate(delta)
 	_update_head(delta)
@@ -298,14 +306,18 @@ func _update_spine(delta: float) -> void:
 		body_mi.rotation.z = _lean * 0.30
 
 	# upload to GPU — stations map along WIDTH (x), sampled as vec2(t, 0.5)
+	# The Image + texture are allocated once; set_data overwrite keeps a
+	# single reused buffer (10 serpents × 6 KB per frame otherwise churns GC).
 	var bytes := _spine.to_byte_array()
-	var img := Image.create_from_data(RING_COUNT, 1, false, Image.FORMAT_RGBAF, bytes)
+	if _spine_img == null:
+		_spine_img = Image.create_from_data(RING_COUNT, 1, false, Image.FORMAT_RGBAF, bytes)
+	else:
+		_spine_img.set_data(RING_COUNT, 1, false, Image.FORMAT_RGBAF, bytes)
 	if _tex == null:
-		_spine_img_cache = img
-		_tex = ImageTexture.create_from_image(img)
+		_tex = ImageTexture.create_from_image(_spine_img)
 		_mat.set_shader_parameter(&"u_spine", _tex)
 	else:
-		_tex.update(img)
+		_tex.update(_spine_img)
 
 	# driving uniforms
 	_mat.set_shader_parameter(&"u_ds", ds)
@@ -324,14 +336,21 @@ func _update_spine(delta: float) -> void:
 			_spine[o + 2] + head.z))
 		coll_r.append(_spine[o + 3] * 0.86)
 
-var _spine_img_cache: Image = null
-
 func _hist_at(steps_back: int) -> Vector3:
 	return _hist[(_hist_write - 1 - steps_back + 2 * HIST_MAX) % HIST_MAX]
 
+## Optional per-instance girth multiplier (menu serpents slim down; gameplay
+## keeps the chunky top-down proportions). 1.0 = untouched game behavior.
+var girth := 1.0
+# Spine-rebuild stride: 1 = every physics tick (players + close serpents);
+# >1 = every Nth tick (phone-tier AI serpents — halves the biggest sim cost).
+var spine_stride := 1
+var spine_full_rate := false
+var _spine_tick := 0
+
 func _body_radius() -> float:
 	# chunkier bodies read much better from the fixed top-down camera (§1)
-	var r := clampf(0.56 + length * 0.0020, 0.56, 0.72)
+	var r := clampf(0.56 + length * 0.0020, 0.56, 0.72) * girth
 	if is_boss:
 		r *= 1.9
 	return r
@@ -490,10 +509,27 @@ func _build_head() -> void:
 	sm.radial_segments = 18
 	sm.rings = 10
 	skull.mesh = sm
-	skull.scale = Vector3(1.32, 0.95, 1.52)
+	skull.scale = Vector3(1.42, 0.95, 1.52)
 	skull.position = Vector3(0, 0.02, 0.52)
 	skull.material_override = _skin_mat(false, Vector2(3.0, 2.2))
 	head_root.add_child(skull)
+
+	# -- crown plate: the darker scaled top of the head, what a top-down
+	#    camera actually sees; separates the head from the neck seam
+	var crown := MeshInstance3D.new()
+	var cm := SphereMesh.new()
+	cm.radius = 0.5
+	cm.height = 1.0
+	cm.radial_segments = 14
+	cm.rings = 7
+	crown.mesh = cm
+	crown.scale = Vector3(1.10, 0.34, 1.34)
+	crown.position = Vector3(0, 0.30, 0.10)
+	var cm_mat := _skin_mat(false, Vector2(2.2, 1.6))
+	cm_mat.albedo_color = dorsal.darkened(0.42)
+	_dark_mats.append(cm_mat)
+	crown.material_override = cm_mat
+	head_root.add_child(crown)
 
 	# -- snout (tapered muzzle) --
 	var snout := MeshInstance3D.new()
@@ -524,20 +560,21 @@ func _build_head() -> void:
 	for side in [-1.0, 1.0]:
 		var eye := MeshInstance3D.new()
 		var em := SphereMesh.new()
-		em.radius = 0.125
-		em.height = 0.25
+		em.radius = 0.165
+		em.height = 0.33
 		em.radial_segments = 12
 		em.rings = 8
 		eye.mesh = em
-		eye.position = Vector3(side * 0.26, 0.10, -0.44)
-		eye.scale = Vector3(1.0, 0.9, 0.7)
+		# higher and wider: eyes must be visible from the top-down camera
+		eye.position = Vector3(side * 0.30, 0.16, -0.44)
+		eye.scale = Vector3(1.0, 0.9, 0.55)
 		var mat := StandardMaterial3D.new()
 		mat.albedo_color = Color(0.90, 0.60, 0.14)
 		mat.metallic = 0.35
 		mat.roughness = 0.12
 		mat.emission_enabled = true
 		mat.emission = Color(0.35, 0.22, 0.05)
-		mat.emission_energy_multiplier = 0.5
+		mat.emission_energy_multiplier = 0.7
 		eye.material_override = mat
 		_eye_mats.append(mat)
 		head_root.add_child(eye)
@@ -589,11 +626,11 @@ func _build_head() -> void:
 	head_root.add_child(_tongue)
 	for side in [-1.0, 1.0]:
 		var fork := MeshInstance3D.new()
-		var cm := CylinderMesh.new()
-		cm.top_radius = 0.008
-		cm.bottom_radius = 0.016
-		cm.height = 0.55
-		fork.mesh = cm
+		var fm := CylinderMesh.new()
+		fm.top_radius = 0.008
+		fm.bottom_radius = 0.016
+		fm.height = 0.55
+		fork.mesh = fm
 		fork.rotation = Vector3(PI / 2.0 + side * 0.10, side * 0.10, 0)
 		fork.position = Vector3(side * 0.035, 0, -0.26)
 		fork.scale = Vector3(1, 1, 1)
@@ -643,6 +680,10 @@ func set_rim(v: float) -> void:
 		m2.rim = v * 0.6
 		m2.rim_tint = 0.6
 
+## Raw body shader material (used by the menu scene to dim distant serpents).
+func get_body_material() -> ShaderMaterial:
+	return _mat
+
 func _head_tint(snout_flavor: bool) -> Color:
 	# head matches the body base so the neck seam disappears from above
 	return dorsal.lightened(0.06) if snout_flavor else dorsal
@@ -663,6 +704,8 @@ func apply_skin(d: Color, a: Color, b: Color, seed: float, pat: int = -1) -> voi
 		_mat.set_shader_parameter(&"u_pattern", float(pattern))
 	for rec in _skin_mats:
 		(rec[0] as StandardMaterial3D).albedo_color = _head_tint(bool(rec[1]))
+	for dm in _dark_mats:
+		dm.albedo_color = dorsal.darkened(0.42)
 
 func sync_head_params(body_r: float) -> void:
 	# Scale entire head rig with body radius so proportions stay believable

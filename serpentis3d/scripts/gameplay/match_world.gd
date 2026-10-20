@@ -31,6 +31,8 @@ var no_death := false
 var solo_dev := false
 var skip_hud_dev := false
 var verbose := false
+var _hud_tick := 0    # HUD feed gate (15 Hz)
+var _eat_tick := 0    # eat-check gate (30 Hz)
 var boss_scheduled := false
 var _worst_dt := 0.0
 var _spawn_base_ang := 0.0
@@ -136,12 +138,14 @@ func _spawn_ai() -> void:
 	_pers_cycle += 1
 	var s := AISnake.new()
 	s.configure(pers, self)
+	s.spine_stride = 2   # phone tier: AI serpents rebuild the tube at 30 Hz
 	var start_len := randf_range(5.0, 20.0)
 	_attach(s, false, start_len)
 
 func _spawn_boss() -> void:
 	var s := AISnake.new()
 	s.configure("hunter", self)
+	s.spine_stride = 2
 	s.is_boss = true
 	s.pattern = 1   # broad dark saddle bands — reads as "elite apex" from above
 	s.max_length = 90.0
@@ -235,7 +239,19 @@ func _physics_process(delta: float) -> void:
 		_worst_dt = delta
 	if _hb > 5.0 and verbose:
 		_hb = 0.0
-		print("HB t=%.1f snakes=%d orbs=%d fps=%d worst_dt=%.0fms | %s" % [match_time, snake_count(), food.count_alive(), Engine.get_frames_per_second(), _worst_dt * 1000.0, food.debug_state()])
+		# Profile line: scene stats (draw calls / objects / prims / VRAM) +
+		# frame timings, straight from the RenderingServer so numbers are
+		# measured not guessed; dev-tool only, zero cost without --autoplay.
+		var rs_c := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
+		var rs_o := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_OBJECTS_IN_FRAME)
+		var rs_p := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME)
+		var rs_v := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIDEO_MEM_USED)
+		var pt: float = Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS)
+		var pr: float = Performance.get_monitor(Performance.TIME_PROCESS)
+		print("HB t=%.1f snakes=%d orbs=%d fps=%d worst_dt=%.0fms | %s | dc=%d objs=%d prims=%.1fk vram=%.0fMB phy=%.1fms proc=%.1fms" % [
+			match_time, snake_count(), food.count_alive(), Engine.get_frames_per_second(),
+			_worst_dt * 1000.0, food.debug_state(), rs_c, rs_o, rs_p / 1000.0,
+			rs_v / (1024.0 * 1024.0), float(pt) * 1000.0, float(pr) * 1000.0])
 		_worst_dt = 0.0
 
 	# boss appears in real matches after 60 s
@@ -259,7 +275,11 @@ func _physics_process(delta: float) -> void:
 
 	_build_hash()
 	_head_collisions()
-	_eat_checks()
+	# eat checks tick at 30 Hz: an eat starting one tick late is invisible and
+	# the check is a real share of the phone physics budget (orbs × heads)
+	_eat_tick += 1
+	if _eat_tick % 2 == 0:
+		_eat_checks()
 
 	if not demo_mode and player != null and is_instance_valid(player) and player.alive:
 		_update_hud()
@@ -308,8 +328,6 @@ func _build_hash() -> void:
 	_pr.clear()
 	_po.clear()
 	_id_map.clear()
-	_hash.clear()
-	_id_map.clear()
 	for s in snakes:
 		if not is_instance_valid(s) or not s.alive:
 			continue
@@ -324,8 +342,9 @@ func _build_hash() -> void:
 			_pr.append(cr[i])
 			_po.append(s.id)
 			var key := Vector2i(int(floor(p.x / _cell)), int(floor(p.z / _cell)))
-			var arr: Array = _hash.get(key, [])
-			if arr.is_empty():
+			var arr = _hash.get(key)   # untyped: null means "new cell" (no per-call array alloc)
+			if arr == null:
+				arr = []
 				_hash[key] = arr
 			arr.append(ii)
 
@@ -462,6 +481,12 @@ func _update_hud() -> void:
 	if hud == null or not is_instance_valid(hud):
 		return
 	if skip_hud_dev:
+		return
+	# was per-tick: a fresh 11-entry array + sort + eight label writes at 60 Hz
+	# is real CPU on phones — the live readout updates at 15 Hz instead (the
+	# boost bar glides at that rate without any visible difference)
+	_hud_tick += 1
+	if _hud_tick % 4 != 0:
 		return
 	var alive := get_alive_snakes()
 	alive.sort_custom(func(a, b): return a.score > b.score)

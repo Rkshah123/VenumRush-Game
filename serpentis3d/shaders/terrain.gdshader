@@ -9,6 +9,7 @@ varying vec3 v_world_pos;
 varying vec3 v_col;
 
 uniform float u_court_r = 56.0;   // playable circle radius — diagonal turf bands live inside it
+uniform float u_tier = 2.0;       // perf tier: <0.5 = phone fragment budget (2 noise octaves only)
 
 void vertex() {
 	v_col = COLOR.rgb;
@@ -16,7 +17,12 @@ void vertex() {
 }
 
 float hash2(vec2 p) {
-	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+	// precision-safe cell hash: the classic fract(sin(...)*43758) form degrades
+	// to visible square blocks once the sin argument grows past a few thousand
+	// radians (mediump fragment precision), which happens fast at world scale.
+	p = fract(p * vec2(123.34, 456.21));
+	p += dot(p, p + 45.32);
+	return fract(p.x * p.y);
 }
 
 float vnoise(vec2 p) {
@@ -44,15 +50,26 @@ float fbm(vec2 p) {
 void fragment() {
 	// vertex colors carry the whole biome pass; fragment adds cheap detail only
 	// Multi-octave detail so the court still reads as ground when the 2D
-	// camera sits close to the snake (spec §6)
+	// camera sits close to the snake (spec §6). All detail terms are SMOOTH
+	// value noise — raw cell-hash blocks shimmer into ugly pixel squares at
+	// close zoom, so no floor() lattices down here.
+	//
+	// Tier budget: mottle+fine always run; micro + patch (fbm = ~16 extra
+	// hash evals per pixel — the dominant fill cost on phones) are desktop
+	// tier only. Uniform-bound branch: no divergence in practice.
 	float mottle = vnoise(v_world_pos.xz * 1.35);
 	float fine = vnoise(v_world_pos.xz * 4.4);
-	float patch = fbm(v_world_pos.xz * 0.11);
 	vec3 col = v_col;
-	col *= 0.86 + 0.24 * mottle + 0.10 * fine;
-	col *= 0.94 + 0.12 * patch;
-	col *= 1.0 + (hash2(floor(v_world_pos.xz * 3.0)) - 0.5) * 0.06;
-	col *= 1.0 + (hash2(floor(v_world_pos.xz * 9.0)) - 0.5) * 0.045;
+	float det = 0.22 * mottle + 0.08 * fine;
+	float patch_mult = 1.0;
+	if (u_tier > 0.5) {
+		float micro = vnoise(v_world_pos.xz * 9.1);
+		float patch = fbm(v_world_pos.xz * 0.11);
+		det += 0.04 * micro;
+		patch_mult = 0.94 + 0.12 * patch;
+	}
+	col *= 0.88 + det;
+	col *= patch_mult;
 
 	// Stadium-style diagonal mow bands inside the playable circle — readable
 	// from the fixed top-down camera, soft-edged so they never shimmer.

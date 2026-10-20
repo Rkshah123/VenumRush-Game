@@ -120,13 +120,13 @@ void fragment() {
 	pat_m *= smoothstep(0.10, 0.55, s_m); // let the head zone stay clean
 
 	// --- Base color assembly ---
-	vec3 col = u_dorsal.rgb * (0.58 + 0.62 * sv);           // textured scales
-	col = mix(col, pat_col * (0.72 + 0.42 * sv), pat_m);    // pattern over scales
+	vec3 col = u_dorsal.rgb * (0.44 + 0.74 * sv);          // textured scales: plate tops pop, seams sink
+	col = mix(col, pat_col * (0.60 + 0.50 * sv), pat_m);    // pattern over scales
 	// Dorsal line accent along the spine (many colubrids have one)
 	float dorsal_line = smoothstep(0.16, 0.0, topness) * (1.0 - belly_f);
-	col = mix(col, mix(u_dorsal.rgb, u_accent.rgb, 0.38), dorsal_line * 0.20);
+	col = mix(col, mix(u_dorsal.rgb, u_accent.rgb, 0.38), dorsal_line * 0.22);
 	// Belly plate: light, smoother, faint scale
-	col = mix(col, u_belly.rgb * (0.86 + 0.22 * sv), belly_f);
+	col = mix(col, u_belly.rgb * (0.80 + 0.26 * sv), belly_f);
 	// Skin tone eases from the head's own tint into the body pattern
 	float head_fade = smoothstep(0.18, 0.85, s_m);
 	col = mix(u_dorsal.rgb * 0.88, col, head_fade);
@@ -137,14 +137,15 @@ void fragment() {
 	vec3 T = normalize(cross(v_axis, N) + vec3(0.0001));
 	vec3 Bt = normalize(cross(N, T));
 	vec2 nt = texture(u_scale_n, suv).rg * 2.0 - 1.0;
-	float nstr = 1.05 * (1.0 - belly_f * 0.65) * head_fade;
+	float nstr = 1.35 * (1.0 - belly_f * 0.60) * head_fade;
 	N = normalize(N + T * nt.x * nstr + Bt * nt.y * nstr * 0.75);
 	NORMAL = N;
 
 	ALBEDO = col;
-	// wetter, glossier skin so scales catch the sun like the reference snakes
-	ROUGHNESS = clamp(0.26 + 0.28 * (1.0 - sv) + 0.14 * belly_f + 0.10 * pat_m, 0.16, 0.80);
-	SPECULAR = 0.58;
+	// dry matte scales with a slight sheen on the ridge tops (the old
+	// low-roughness "balloon" finish is gone; real skin is not polished wax)
+	ROUGHNESS = clamp(0.48 + 0.30 * (1.0 - sv) + 0.16 * belly_f + 0.10 * pat_m, 0.32, 0.92);
+	SPECULAR = 0.38;
 	// Theme visibility pass: fresnel edge light in the snake's accent color so
 	// bodies never merge into dark arenas / 2D backgrounds.
 	float fres = pow(1.0 - abs(dot(normalize(N), normalize(VIEW))), 3.0);

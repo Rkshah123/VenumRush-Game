@@ -17,11 +17,16 @@ const KIND_GROWTH := [0.5, 0.95, 1.4, 0.4]
 const KIND_SCORE := [10, 30, 75, 15]
 const KIND_COLORS := [Color(0.92, 0.16, 0.12), Color(0.55, 0.25, 0.75), Color(1.0, 0.78, 0.25), Color(0.42, 0.92, 1.0)]
 const KIND_RADIUS := [0.3, 0.34, 0.4, 0.35]
-const HARD_CAP := 178   # absolute fruit budget — death drops respect this cap
+# absolute fruit budget - death drops respect this cap. Phones keep a leaner
+# court (see _ready): fewer alive orbs means smaller eat-check, hash and
+# MultiMesh work every tick, and density past ~110 was never surface-visible
+const HARD_CAP := 178
+const FRUIT_TILT := 0.60  # ~34° camera-facing lean: silhouette readable top-down
 const BOB_BASE := [0.34, 0.34, 0.34, 0.52]
 const BOB_AMP := [0.07, 0.07, 0.07, 0.13]
 const BOB_SPD := [2.0, 2.0, 2.0, 3.4]
 const FLY_TIME := 0.22  # seconds of the eat-flight into the mouth
+var _bob_frame := 0     # transform-refresh counter for the throttled bob pass
 
 # Variant table per kind. For real foods: path + pool capacity + spawn weight
 # + normalized height + emissive boost. Named surfaces ("surface_map") get
@@ -36,21 +41,21 @@ const SURFACE_COLORS := {
 }
 const VAR_TABLE := [
 	[
-		{"path": "res://models/food/apple.obj", "cap": 90, "w": 0.40, "h": 0.72, "emit": 0.45},
-		{"path": "res://models/food/strawberry.obj", "cap": 45, "w": 0.28, "h": 0.60, "emit": 0.50},
-		{"path": "res://models/food/watermelon_slice.obj", "cap": 45, "w": 0.32, "h": 0.66, "emit": 0.35,
+		{"path": "res://models/food/apple.obj", "cap": 90, "w": 0.40, "h": 0.98, "emit": 0.45},
+		{"path": "res://models/food/strawberry.obj", "cap": 45, "w": 0.28, "h": 0.82, "emit": 0.50},
+		{"path": "res://models/food/watermelon_slice.obj", "cap": 45, "w": 0.32, "h": 0.85, "emit": 0.35,
 			"surface_map": {"rind": "rind_green", "rindw": "rind_lime", "black": "seed_dark"}},
 	],
 	[
-		{"path": "res://models/food/cherries.obj", "cap": 20, "w": 0.58, "h": 0.60, "emit": 0.55},
-		{"path": "res://models/food/mushroom.obj", "cap": 14, "w": 0.42, "h": 0.58, "emit": 0.55,
+		{"path": "res://models/food/cherries.obj", "cap": 20, "w": 0.58, "h": 0.78, "emit": 0.55},
+		{"path": "res://models/food/mushroom.obj", "cap": 14, "w": 0.42, "h": 0.75, "emit": 0.55,
 			"surface_map": {"white": "spore_light"}},
 	],
 	[
-		{"path": "res://models/food/lemon.obj", "cap": 10, "w": 0.36, "h": 0.70, "emit": 0.60},
-		{"path": "res://models/food/banana.obj", "cap": 8, "w": 0.32, "h": 0.64, "emit": 0.60,
+		{"path": "res://models/food/lemon.obj", "cap": 10, "w": 0.36, "h": 0.94, "emit": 0.60},
+		{"path": "res://models/food/banana.obj", "cap": 8, "w": 0.32, "h": 0.88, "emit": 0.60,
 			"surface_map": {"banana2": "seed_dark", "seed": "fruit_inner"}},
-		{"path": "res://models/food/carrot.obj", "cap": 7, "w": 0.32, "h": 0.78, "emit": 0.60},
+		{"path": "res://models/food/carrot.obj", "cap": 7, "w": 0.32, "h": 1.05, "emit": 0.60},
 	],
 	[
 		{"path": "", "cap": 8, "w": 1.0, "h": 0.6, "emit": 1.0, "power": true},
@@ -74,7 +79,11 @@ var _pop_hits := 0
 
 # ---------------------------------------------------------------- lifecycle
 
+var hard_cap := HARD_CAP   # effective budget; phones run ~2/3 of it
+
 func _ready() -> void:
+	if OS.get_name() == "Android" or OS.get_name() == "iOS":
+		hard_cap = 112
 	for kind in VAR_TABLE.size():
 		var pools: Array = []
 		var caps: Array = []
@@ -141,7 +150,13 @@ func _make_pool(mesh: Mesh, cap: int) -> Dictionary:
 	mmi.multimesh = mm
 	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mmi)
-	return {"mm": mm, "free": free, "alive": {}}
+	# camera-facing lean compensation: a tilted fruit sinks one half into the
+	# floor, so the spawn float gets the sink back (real silhouette from above)
+	var sink := 0.0
+	if mesh != null:
+		var bb := mesh.get_aabb()
+		sink = sin(FRUIT_TILT) * bb.size.y * 0.5
+	return {"mm": mm, "free": free, "alive": {}, "sink": sink}
 
 func reset() -> void:
 	for kind in _slots.size():
@@ -188,7 +203,7 @@ func debug_state() -> String:
 # ---------------------------------------------------------------- spawn/remove
 
 func drop_orb(kind: int, pos: Vector3) -> void:
-	if _total >= HARD_CAP:
+	if _total >= hard_cap:
 		return
 	_spawn_orb(kind, pos)
 
@@ -203,7 +218,7 @@ func _pick_variant(kind: int) -> int:
 	return table.size() - 1
 
 func _spawn_orb(kind: int, at: Vector3 = Vector3.INF) -> void:
-	if _total >= HARD_CAP:
+	if _total >= hard_cap:
 		return
 	var pools: Array = _slots[kind]
 	var vi := _pick_variant(kind)
@@ -324,6 +339,11 @@ func pop_at(pos: Vector3, kind: int) -> void:
 
 func _process(delta: float) -> void:
 	var t := Time.get_ticks_msec() * 0.001
+	# passive orbs re-write their (static-ish) transforms at ~20 Hz: the bob
+	# waves are 0.3-0.5 Hz, so 1/3 rate is visually identical and cuts the
+	# per-frame MultiMesh churn (178 instances) to a third on weak devices.
+	_bob_frame += 1
+	var bob_tick: bool = _bob_frame % 3 == 0
 	for kind in _slots.size():
 		var pools: Array = _slots[kind]
 		for s: Dictionary in pools:
@@ -353,6 +373,8 @@ func _process(delta: float) -> void:
 						_bury_idx(s, idx, kind)
 						pop_at(head - Vector3.UP * 0.1, kind)
 					continue
+				if not bob_tick:
+					continue   # passive orb: transform refresh at the throttled rate
 				var ph: float = rec["phase"]
 				var p: Vector3 = rec["pos"]
 				var yaw := sin(t * 0.7 + ph) * 0.28 + (t * 2.2 if kind == 3 else 0.0)
@@ -365,11 +387,19 @@ func _process(delta: float) -> void:
 					sc = 1.0 + 0.45 * sin(k * PI) * (1.0 - k) - 0.45 * k * (1.0 - k)
 					sc = maxf(sc, 0.05)
 					yy -= 0.5 * (1.0 - k)
-				var basis := Basis(Vector3.UP, yaw).scaled(Vector3(sc, sc, sc))
+				var basis: Basis
+				if kind == 3:
+					basis = Basis(Vector3.UP, yaw).scaled(Vector3(sc, sc, sc))   # power ring stays level
+				else:
+					# fixed camera-facing lean: a real fruit silhouette (side
+					# profile + stem/leaf) instead of a top-view circle
+					basis = (Basis(Vector3.UP, yaw) * Basis(Vector3(1, 0, 0), FRUIT_TILT)) \
+						.scaled(Vector3(sc, sc, sc))
+					yy += float(s["sink"])
 				mm.set_instance_transform(idx, Transform3D(basis, p + Vector3(0.0, yy, 0.0)))
 	# trickle respawn (top: 1 per frame) — also respects the global budget
 	for kind in KIND_TARGETS.size():
-		if _deficit[kind] > 0 and _total < HARD_CAP:
+		if _deficit[kind] > 0 and _total < hard_cap:
 			_deficit[kind] -= 1
 			_spawn_orb(kind)
 			break
@@ -387,9 +417,10 @@ func _real_fruit_mesh(path: String, height: float, emit: float, surface_map: Dic
 	if src == null:
 		push_warning("Food model missing: %s — packing empty mesh" % path)
 		return am
-	# Dark Theme / 2D mode: extra emissive lift keeps fruit readable on the
-	# darkened courts (contrast audit requirement)
-	var emit_b := emit * (1.55 if dark_theme else (1.25 if mode_2d else 1.0))
+	# Dark Theme / 2D mode: a modest emissive lift keeps fruit edge-readable
+	# on the darkened courts — but heavy glow washes the models flat, so the
+	# saturations stay low and readability comes from the (now bigger) shape.
+	var emit_b := emit * (0.55 if dark_theme else (0.38 if mode_2d else 0.0))
 	var bb := src.get_aabb()
 	var sc: float = height / maxf(bb.size.y, 0.001)
 	var lift: float = -bb.position.y * sc
@@ -406,7 +437,7 @@ func _real_fruit_mesh(path: String, height: float, emit: float, surface_map: Dic
 		elif surface_map.has(nm):
 			st.set_material(_mapped_mat(surface_map[nm]))
 		else:
-			st.set_material(_fruit_base_mat(KIND_COLORS[kind].lightened(0.08), emit_b, 0.34))
+			st.set_material(_fruit_base_mat(KIND_COLORS[kind], emit_b, 0.52))
 		st.commit(am)
 	# rare / golden fruit sit in a soft additive glow halo so they read as
 	# special pickups from the top-down camera (spec §4)
@@ -416,10 +447,40 @@ func _real_fruit_mesh(path: String, height: float, emit: float, surface_map: Dic
 		sh.append_from(halo, 0, Transform3D(Basis(), Vector3(0.0, 0.02, 0.0)))
 		sh.set_material(halo.material)
 		sh.commit(am)
+	# produce shapes without a leaf/stem surface in the OBJ get a tiny top
+	# stem + leaf so the top-down silhouette still says "fruit" (an apple from
+	# directly above is otherwise just a red circle)
+	if src is ArrayMesh:
+		var lm := src as ArrayMesh
+		var shaped := false
+		for i in lm.get_surface_count():
+			var snm := lm.surface_get_name(i)
+			if snm.contains("leaf") or snm.contains("stem") or snm.contains("rind"):
+				shaped = true
+				break
+		if not shaped:
+			_append_top_leaf(am, height)
 	var sbl := SurfaceTool.new()
 	_blob_surface(sbl)
 	sbl.commit(am)
 	return am
+
+func _append_top_leaf(am: ArrayMesh, height: float) -> void:
+	var stem := CylinderMesh.new()
+	stem.top_radius = 0.012
+	stem.bottom_radius = 0.028
+	stem.height = height * 0.10
+	var st := SurfaceTool.new()
+	st.append_from(stem, 0, Transform3D(Basis(), Vector3(0.0, height - stem.height * 0.42, 0.0)))
+	st.set_material(_stem_mat())
+	st.commit(am)
+	var leaf := PlaneMesh.new()
+	leaf.size = Vector2(height * 0.26, height * 0.13)
+	var st2 := SurfaceTool.new()
+	var tb := Basis(Vector3(1, 0, 0), -0.14) * Basis(Vector3(0, 1, 0), 0.5)
+	st2.append_from(leaf, 0, Transform3D(tb, Vector3(height * 0.10, height - stem.height * 0.80, height * 0.04)))
+	st2.set_material(_leaf_mat())
+	st2.commit(am)
 
 func _halo_surface(tint: Color) -> QuadMesh:
 	var q := QuadMesh.new()
@@ -492,7 +553,7 @@ func _fruit_base_mat(albedo: Color, emit: float, rough: float) -> StandardMateri
 		m.emission_energy_multiplier = emit
 	if dark_theme or mode_2d:
 		m.rim_enabled = true
-		m.rim = 0.5
+		m.rim = 0.22
 		m.rim_tint = 0.6
 	return m
 

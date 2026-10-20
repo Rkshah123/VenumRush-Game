@@ -5,7 +5,8 @@ extends Node3D
 enum State { MENU, PLAYING, PAUSED, OVER }
 
 var hud: GameHud
-var match_world: MatchWorld
+var match_world: MatchWorld = null   # built lazily on the first Play (menu boot cost)
+var menu_world: MenuWorld            # dedicated home-screen scene (never the arena)
 var cam: Camera3D
 var state := State.MENU
 var _arena_key := "valley"
@@ -129,15 +130,13 @@ func _ready() -> void:
 	_theme_id = int(SaveMgr.get_value("theme", UiTheme.CLASSIC))
 	hud = GameHud.new()
 	add_child(hud)
-	match_world = MatchWorld.new()
-	match_world.hud = hud
-	match_world.arena_key = _arena_key
-	match_world.gfx_mode = _gfx_mode
-	match_world.dark = _theme_id == UiTheme.DARK
-	add_child(match_world)
-	hud.minimap().world = match_world      # arena radar reads the live world
-	match_world.match_event.connect(hud.push_feed)
-	match_world.player_died.connect(_on_player_died)
+	# The home-screen backdrop is its own cinematic scene, never the arena.
+	menu_world = MenuWorld.new()
+	menu_world.dark = _theme_id == UiTheme.DARK
+	add_child(menu_world)
+	# The gameplay world is built LAZILY on the first Play — boot cost and
+	# memory are spent on the menu, and the arena can never leak behind it.
+	match_world = null
 	hud.set_arena(_arena_key)
 	hud.arena_shift.connect(_on_arena_shift)
 	hud.theme_changed.connect(_on_theme_changed)
@@ -293,9 +292,9 @@ func _dev_sequence() -> void:
 		await _snap("shot_mid.png")
 		await get_tree().create_timer(_quit_at * 0.5).timeout
 		print("DEV: end timer fired")
-		if _shot_game:
-			await _snap("shot_game.png")
-		_quit_nicely()
+	if _shot_game:
+		await _snap("shot_game.png")
+	_quit_nicely()
 
 # ---------------------------------------------------------------- touch QA
 
@@ -901,7 +900,10 @@ func _theme_test_run() -> void:
 		print("THEMETEST mode=%d cam_tilt_dirty=%s saved=%d" % [m, str(_topdown_dirty), int(SaveMgr.get_value("gfx_mode", 1))])
 	hud.theme_changed.emit(UiTheme.DARK)
 	await get_tree().process_frame
-	print("THEMETEST dark-world=%s rim=%.2f" % [str(match_world.dark), match_world._rim_for()])
+	# menu state: the dedicated cinematic scene re-tints (the arena is built
+	# lazily on Play, so null is expected here)
+	print("THEMETEST dark-menu-scene=%s match_world=%s" % [
+		str(menu_world.dark), str(match_world.dark) if match_world != null else "not-built"])
 	# restore defaults so QA never leaves the player's save dirty
 	SaveMgr.set_value("theme", UiTheme.CLASSIC)
 	SaveMgr.set_value("gfx_mode", 1)
@@ -972,8 +974,45 @@ func _snap(fname: String) -> void:
 
 # ---------------------------------------------------------------- state flow
 
+# ------------------------------------------------------------ scene switching
+
+## Build the gameplay world on demand (menu boot never pays for the arena).
+func _create_match_world() -> void:
+	match_world = MatchWorld.new()
+	match_world.hud = hud
+	match_world.arena_key = _arena_key
+	match_world.gfx_mode = _gfx_mode
+	match_world.dark = _theme_id == UiTheme.DARK
+	add_child(match_world)
+	hud.minimap().world = match_world   # arena radar reads the live world
+	match_world.match_event.connect(hud.push_feed)
+	match_world.player_died.connect(_on_player_died)
+
+## Home screen active: menu world awake, gameplay world fully dormant.
+func _show_menu_scene() -> void:
+	menu_world.visible = true
+	menu_world.process_mode = Node.PROCESS_MODE_INHERIT
+	menu_world.ensure_life()
+	menu_world.set_dark(_theme_id == UiTheme.DARK)
+	if match_world != null:
+		match_world.visible = false
+		match_world.process_mode = Node.PROCESS_MODE_DISABLED
+
+## Gameplay view: menu scene fully shut down (zero CPU), match world live.
+func _show_game_scene() -> void:
+	menu_world.process_mode = Node.PROCESS_MODE_DISABLED
+	menu_world.visible = false
+	if match_world == null:
+		_create_match_world()
+	elif match_world.arena_key != _arena_key:
+		# arena changed while the player was in the menu: rebuild now
+		_recreate_world()
+	match_world.visible = true
+	match_world.process_mode = Node.PROCESS_MODE_INHERIT
+
 func _start_play() -> void:
 	state = State.PLAYING
+	_show_game_scene()
 	hud.show_menu(false)
 	hud.show_pause(false)
 	hud.show_gameover_hidden()
@@ -1018,6 +1057,8 @@ func _bind_joystick() -> void:
 	if joy == null:
 		return
 	joy.vector_changed.connect(func(v: Vector2):
+		if match_world == null:
+			return
 		var p := match_world.player
 		if p is PlayerSnake:
 			p.joy_vec = v
@@ -1026,6 +1067,8 @@ func _bind_joystick() -> void:
 ## The stick owns steering in mobile 2D, so the snake must NOT auto-arc while
 ## idle underneath it (that idle circle read as "it only moves in circles").
 func _sync_joystick_flags() -> void:
+	if match_world == null:
+		return   # no live match yet (menu): nothing to sync
 	var p := match_world.player
 	if p is PlayerSnake:
 		var joy: TouchJoystick = hud.joystick()
@@ -1035,7 +1078,8 @@ func _restart() -> void:
 	_start_play()
 
 func _on_arena_shift(dir: int) -> void:
-	# only meaningful in the menu; swaps the live demo backdrop
+	# menu ARENA selector: just remember the choice — the playable arena is
+	# built fresh at Play time, and the menu backdrop is never the arena
 	if state != State.MENU:
 		return
 	var nk := ArenaPresets.next_key(_arena_key) if dir >= 0 else ArenaPresets.prev_key(_arena_key)
@@ -1043,19 +1087,14 @@ func _on_arena_shift(dir: int) -> void:
 	SaveMgr.set_value("arena", nk)
 	SaveMgr.save()
 	hud.set_arena(nk)
-	_rebuild_world()
-	match_world.start_demo()
 
 func _on_theme_changed(id: int) -> void:
-	# Dark Theme: retint the running world instantly (UI already applied by
-	# the HUD). Rebuilding re-bakes court/terrain/sky/decor for the palette.
+	# Dark Theme: retint the UI (HUD does that) + whichever scene is live.
 	_theme_id = id
 	SaveMgr.set_value("theme", id)
-	match_world.dark = id == UiTheme.DARK
 	if state == State.MENU:
-		_rebuild_world()
-		match_world.start_demo()
-	else:
+		menu_world.set_dark(id == UiTheme.DARK)
+	elif match_world != null:
 		match_world.restyle(id == UiTheme.DARK, _gfx_mode == 0)
 
 func _on_mode_changed(id: int) -> void:
@@ -1063,28 +1102,26 @@ func _on_mode_changed(id: int) -> void:
 	_gfx_mode = id
 	SaveMgr.set_value("gfx_mode", id)
 	_topdown_dirty = true
-	match_world.gfx_mode = id
 	hud.set_joystick_mode(id == 0)
 	_sync_joystick_flags()
 	if state == State.MENU:
-		_rebuild_world()
-		match_world.start_demo()
-	else:
+		return   # menu is mode-agnostic; the match world is built at Play
+	if match_world != null:
+		match_world.gfx_mode = id
 		match_world.restyle(match_world.dark, id == 0)
 
 func _rebuild_world() -> void:
 	if is_instance_valid(match_world):
 		match_world.queue_free()
-	match_world = MatchWorld.new()
-	match_world.hud = hud
-	match_world.arena_key = _arena_key
-	match_world.gfx_mode = _gfx_mode
-	match_world.dark = _theme_id == UiTheme.DARK
-	add_child(match_world)
-	if hud.minimap() != null:
-		hud.minimap().world = match_world   # radar follows the rebuilt world
-	match_world.match_event.connect(hud.push_feed)
-	match_world.player_died.connect(_on_player_died)
+	match_world = null
+	_show_game_scene()   # recreates with the current arena/mode/theme
+
+## Recreate the gameplay world (kept separate for clarity at the call sites).
+func _recreate_world() -> void:
+	if is_instance_valid(match_world):
+		match_world.queue_free()
+	match_world = null
+	_create_match_world()
 
 func _to_menu() -> void:
 	state = State.MENU
@@ -1094,7 +1131,9 @@ func _to_menu() -> void:
 	hud.show_pause(false)
 	hud.show_gameover_hidden()
 	hud.set_gameplay_visible(false)
-	match_world.start_demo()
+	_show_menu_scene()
+	# restore the boot camera pose so the menu drift starts sane
+	cam.projection = Camera3D.PROJECTION_PERSPECTIVE
 
 func _on_player_died() -> void:
 	if _autoplay:
@@ -1208,37 +1247,12 @@ func _input(event: InputEvent) -> void:
 func _physics_process(delta: float) -> void:
 	match state:
 		State.MENU:
-			if match_world.running and match_world.get_alive_snakes().size() > 0:
-				# cinematic menu orbit around arena action (steeper in 2D mode
-				# so the backdrop reads as the top-down board)
-				var focus := _demo_focus()
-				_cam_angle += delta * 0.08
-				if _gfx_mode == 0:
-					# 2D mode: flat orthographic board backdrop with a slow drift
-					cam.projection = Camera3D.PROJECTION_ORTHOGONAL
-					var vpm := get_viewport().get_visible_rect().size
-					var m_aspect := 1.6
-					if vpm.y > 1.0:
-						m_aspect = vpm.x / vpm.y
-					# fit the whole board across the short axis of the screen
-					var msize: float = clampf((match_world.arena_radius * 2.0 + 7.0) / maxf(m_aspect, 0.4), 34.0, 132.0)
-					cam.size = lerpf(cam.size if cam.size > 0.1 else msize, msize, 1.0 - exp(-2.0 * delta))
-					var boff := Vector3(cos(_cam_angle) * 7.0, 0.0, sin(_cam_angle) * 7.0)
-					cam.global_transform = Transform3D(
-						Basis(Vector3(1, 0, 0), Vector3(0, 0, -1), Vector3(0, 1, 0)),
-						focus + Vector3(0.0, 80.0, 0.0) + boff)
-				else:
-					cam.projection = Camera3D.PROJECTION_PERSPECTIVE   # menu in 3D mode
-					var pos := focus + Vector3(cos(_cam_angle) * 46.0, 31.0, sin(_cam_angle) * 46.0)
-					var look := focus + Vector3.UP * 2.0
-					_cam_pos = _cam_pos.lerp(pos, 1.0 - exp(-2.2 * delta))
-					_cam_look = _cam_look.lerp(look, 1.0 - exp(-2.2 * delta))
-					cam.global_position = _cam_pos
-					cam.look_at(_cam_look, Vector3.UP)
-			else:
-				_start_demo_if_needed()
+			# The dedicated menu scene carries the visuals while the match
+			# world (if any) sleeps dormant behind it.
+			if menu_world != null:
+				menu_world.update_cameras(cam, delta)
 		_:
-			if match_world.player != null and is_instance_valid(match_world.player):
+			if match_world != null and match_world.player != null and is_instance_valid(match_world.player):
 				if _closeup:
 					var p := match_world.player
 					var fwd := Vector3(sin(p.heading), 0.0, cos(p.heading))
@@ -1268,19 +1282,6 @@ func _physics_process(delta: float) -> void:
 					cam.global_position = _cam_pos
 					cam.look_at(_cam_look, Vector3.UP)
 
-func _start_demo_if_needed() -> void:
-	if not match_world.running:
-		match_world.start_demo()
-
-func _demo_focus() -> Vector3:
-	var alive := match_world.get_alive_snakes()
-	if alive.is_empty():
-		return Vector3.ZERO
-	var c := Vector3.ZERO
-	for s in alive:
-		c += Vector3(s.head_pos.x, 0, s.head_pos.z)
-	return c / float(alive.size())
-
 func _topdown_camera(delta: float) -> void:
 	# Graph mode dispatcher (spec §1): 2D = genuine flat top-down board
 	# (orthographic, no perspective), 3D = third-person chase (PUBG-style).
@@ -1304,7 +1305,12 @@ func _camera_2d_topdown(delta: float) -> void:
 	var aspect := 1.6
 	if vp != null and vp.get_visible_rect().size.y > 0.0:
 		aspect = vp.get_visible_rect().size.x / vp.get_visible_rect().size.y
-	var span := 30.0 * clampf(1.45 / maxf(aspect, 0.62), 1.0, 1.35)
+	# Gameplay camera distance (spec §9): the board was framed 30 m tall —
+	# snakes read as confetti at that scale. 22 m keeps the same key
+	# architecture (boost/growth easing, edge clamping) but puts the player
+	# ~36% closer; portrait gets a small multiplier so the board still fills
+	# the narrow screen without starving visibility.
+	var span := 22.0 * clampf(1.30 / maxf(aspect, 0.62), 1.0, 1.22)
 	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * maxf(Snake.BOOST_MULT - 1.0, 0.1)), 0.0, 1.0)
 	var length_k := clampf((p.length - 8.0) / 42.0, 0.0, 1.0)
 	span *= 1.0 + 0.08 * boost_k + 0.07 * length_k

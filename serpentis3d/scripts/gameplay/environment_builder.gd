@@ -340,6 +340,9 @@ func _terrain_material() -> ShaderMaterial:
 	var m := ShaderMaterial.new()
 	m.shader = TERRAIN_SHADER
 	m.set_shader_parameter("u_court_r", _arena_r)
+	# perf tier drives the fragment detail budget: phones skip the micro + fbm
+	# noise terms (the costliest ~2/3 of the per-pixel hash work) with no split
+	m.set_shader_parameter("u_tier", float(_tier))
 	return m
 
 # ---------------------------------------------------------------- sky & sun
@@ -1108,6 +1111,11 @@ func _flower_mesh(petal: Color) -> ArrayMesh:
 # ---------------------------------------------------------------- atmosphere
 
 func _build_atmosphere() -> void:
+	# Flat 2D board: drifting leaves / fireflies / dust sprites read as random
+	# squares floating OVER the court and cost CPUParticles head-room on
+	# phones — the board must stay clean, so none of it is built in 2D.
+	if _mode_2d:
+		return
 	_drifting_leaves()
 	if bool(_p.get("night", false)):
 		_fireflies()
