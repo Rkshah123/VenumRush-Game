@@ -43,6 +43,7 @@ var _arena_test := false
 var _touch_test := false
 var _spawntest := false
 var _powertest := false
+var _eat_test := false
 var _skins_test := false
 var _skin_dev := -1
 var _diag_t := 0.0
@@ -93,6 +94,11 @@ func _ready() -> void:
 			_autoplay = true
 			_powertest = true
 			_solo_dev = true      # no AI kills -> the score rate measures food only
+			_no_death_dev = true
+		if a == "--eat-test":
+			_autoplay = true
+			_eat_test = true
+			_solo_dev = true      # deterministic fruit/eat QA, no rivals stealing fruit
 			_no_death_dev = true
 		if a == "--skins-test":
 			_autoplay = true
@@ -180,7 +186,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--skins-test", "--theme-test", "--uix-test", "--mode-test", "--joystick", "--joy-test", "--dir-test", "--ctrl-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--eat-test", "--skins-test", "--theme-test", "--uix-test", "--mode-test", "--joystick", "--joy-test", "--dir-test", "--ctrl-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -226,13 +232,38 @@ func _dev_sequence() -> void:
 	# menu breathing room, then a real match, optional screenshot & quit
 	await get_tree().create_timer(1.0).timeout
 	if _arena_test:
-		# exercises the same signal the ◄ ► buttons emit: cycle 3 times with
-		# a shot each, verifying world rebuilds + save persistence
+		# exercises the same signal the arrow buttons emit: cycle 3 times with
+		# a shot each, verifying the selector + save persistence, then START a
+		# real match in the selected arena so the choice is proven in gameplay.
+		var arena0 := str(SaveMgr.get_value("arena", "valley"))
+		var cycle_ok := true
 		for i in 3:
 			hud.arena_shift.emit(1)
-			await get_tree().create_timer(2.2).timeout
+			await get_tree().create_timer(1.4).timeout
 			await _snap("shot_arena%d.png" % (i + 1))
-			print("ARENA-TEST now=", _arena_key, " saved=", SaveMgr.get_value("arena"))
+			var saved := str(SaveMgr.get_value("arena", "valley"))
+			var shown := str(hud._arena_label.text) if hud._arena_label != null else ""
+			var preset_name := str(ArenaPresets.get_preset(saved).get("name", ""))
+			print("ARENA-TEST now=%s saved=%s label=%s" % [saved, _arena_key, shown])
+			if saved != _arena_key or shown != preset_name:
+				cycle_ok = false
+		_start_play()
+		match_world.no_death = true
+		await _frames(40)
+		var world_key := str(match_world.arena_key)
+		var obstacles: int = match_world.obstacles.size()
+		var in_arena: bool = match_world.player != null \
+			and match_world.player.head_pos.length() < 58.0
+		var gameplay_ok: bool = world_key == str(SaveMgr.get_value("arena", "valley")) \
+			and obstacles > 0 and in_arena and is_instance_valid(match_world)
+		print("ARENA-TEST gameplay arena=%s obstacles=%d player_inside=%s %s" % [
+			world_key, obstacles, str(in_arena), "PASS" if gameplay_ok else "FAIL"])
+		await _snap("shot_arena_play.png")
+		print("ARENA-TEST done — %s" % ("PASS" if cycle_ok and gameplay_ok else "FAIL"))
+		# leave the user's own arena choice untouched
+		SaveMgr.set_value("arena", arena0)
+		_arena_key = arena0
+		hud.set_arena(arena0)
 		_quit_nicely()
 		return
 	if _skins_test:
@@ -241,6 +272,9 @@ func _dev_sequence() -> void:
 		return
 	if _theme_test:
 		await _theme_test_run()
+		return
+	if _eat_test:
+		await _eat_test_run()
 		return
 	if _shot_menu:
 		await _snap("shot_menu.png")
@@ -693,16 +727,27 @@ func _ctrl_test_run() -> void:
 	var pb: Button = hud._pause_btn
 	var prect := pb.get_global_rect()
 	var pspot := prect.get_center()
+	# the live board must be free to steer BEFORE the modal pause card opens
+	var center_free: bool = not hud.blocks_touch(vs * 0.5)
 	_touch_event(0, pspot, true)
 	await _frames(3)
 	var stolen: bool = joy.active
+	var pause_fired: bool = get_tree().paused
 	_touch_event(0, pspot, false)
 	await _frames(3)
-	var ui_ok: bool = not stolen and hud.blocks_touch(pspot) and not hud.blocks_touch(vs * 0.5)
-	print("CTRLTEST ui-block pause_rect=%s stick_stole=%s %s" % [
-		str(prect.size.round()), str(stolen), "PASS" if ui_ok else "FAIL"])
+	# Opening the pause card is a valid outcome of tapping PAUSE (UIX covers
+	# it); what matters here is that the stick never captures the tap and the
+	# live board centre was steerable first.
+	var ui_ok: bool = not stolen and hud.blocks_touch(pspot) and center_free
+	print("CTRLTEST ui-block pause_rect=%s stick_stole=%s pause_fired=%s center_free=%s %s" % [
+		str(prect.size.round()), str(stolen), str(pause_fired), str(center_free),
+		"PASS" if ui_ok else "FAIL"])
 	if not ui_ok:
 		fails += 1
+	# leave the match live for the pause/resume keyboard check below
+	if get_tree().paused:
+		_resume()
+		await _frames(3)
 	# --- 5. keys still work after pause/resume and after a restart ---
 	p.keyboard_only = true
 	_pause()
@@ -851,7 +896,7 @@ func _mode_test_run() -> void:
 			cam_ok = cam.projection == Camera3D.PROJECTION_PERSPECTIVE \
 				and cam.global_position.y > 6.0 and absf(cam.global_transform.basis.z.y) < 0.95
 		var saved_ok: bool = int(SaveMgr.get_value("gfx_mode", -1)) == want
-		var active_ok := str(btn.text).contains("ACTIVE")
+		var active_ok := str(btn.text).contains("●")
 		print("MODETEST want=%d mode=%d cam_topdown_ok=%s saved=%s active_mark=%s %s" % [
 			want, _gfx_mode, str(cam_ok), str(saved_ok), str(active_ok),
 			"PASS" if (is_2d == (want == 0) and cam_ok and saved_ok and active_ok) else "FAIL"])
@@ -891,6 +936,8 @@ func _theme_test_run() -> void:
 	# applied to the live UI, persistence, and mode switching through the
 	# real settings signal path (no gameplay state is touched).
 	print(UiTheme.theme_report())
+	var arena0 := str(SaveMgr.get_value("arena", "valley"))
+	var theme0 := int(SaveMgr.get_value("theme", UiTheme.CLASSIC))
 	for t in 2:
 		SaveMgr.set_value("theme", t)
 		hud.apply_theme(t)
@@ -900,6 +947,39 @@ func _theme_test_run() -> void:
 			print("THEMETEST FAIL accent")
 			_quit_nicely()
 			return
+	# ------------------------------------------------ main-menu separations
+	# The two labelled selector sections must be independent and truthful.
+	# Drive the REAL menu theme pills / arena chevrons, not internal setters.
+	var dark_btn: Button = null
+	for b in hud._topt:
+		if is_instance_valid(b) and str(b.get_meta("opt_group")) == "theme" \
+				and int(b.get_meta("opt_value")) == UiTheme.DARK:
+			dark_btn = b
+			break
+	if dark_btn == null:
+		print("THEMETEST FAIL no main-menu theme button")
+		_quit_nicely()
+		return
+	dark_btn.emit_signal("pressed")
+	await get_tree().process_frame
+	var arena_after_theme := str(SaveMgr.get_value("arena", "valley"))
+	var theme_sel_ok: bool = hud._theme_sub != null and is_instance_valid(hud._theme_sub) \
+		and hud._theme_sub.text.contains("DARK")
+	print("THEMETEST theme-section dark=%s arena_same=%s label=%s %s" % [
+		str(int(SaveMgr.get_value("theme", 0)) == UiTheme.DARK),
+		str(arena_after_theme == arena0), str(theme_sel_ok),
+		"PASS" if int(SaveMgr.get_value("theme", 0)) == UiTheme.DARK \
+		and arena_after_theme == arena0 and theme_sel_ok else "FAIL"])
+	hud.arena_shift.emit(1)
+	await get_tree().process_frame
+	var arena1 := str(SaveMgr.get_value("arena", "valley"))
+	var arena_name := str(ArenaPresets.get_preset(arena1).get("name", ""))
+	var arena_label_ok: bool = hud._arena_label != null and is_instance_valid(hud._arena_label) \
+		and hud._arena_label.text == arena_name
+	var theme_kept: bool = int(SaveMgr.get_value("theme", 0)) == UiTheme.DARK
+	print("THEMETEST arena-section arena=%s theme_same=%s label=%s %s" % [
+		arena1, str(theme_kept), str(arena_label_ok),
+		"PASS" if arena1 != arena0 and theme_kept and arena_label_ok else "FAIL"])
 	for m in 2:
 		hud.mode_changed.emit(m)
 		await get_tree().process_frame
@@ -910,11 +990,325 @@ func _theme_test_run() -> void:
 	# lazily on Play, so null is expected here)
 	print("THEMETEST dark-menu-scene=%s match_world=%s" % [
 		str(menu_world.dark), str(match_world.dark) if match_world != null else "not-built"])
-	# restore defaults so QA never leaves the player's save dirty
-	SaveMgr.set_value("theme", UiTheme.CLASSIC)
+	# ...and the SAME two menu selections must drive the playable world.
+	_start_play()
+	match_world.no_death = true
+	await _frames(30)
+	var play_ok: bool = match_world != null and match_world.dark \
+		and match_world.arena_key == arena1 and match_world.gfx_mode == 1
+	print("THEMETEST gameplay dark=%s arena=%s mode=%d %s" % [
+		str(match_world.dark), match_world.arena_key, match_world.gfx_mode,
+		"PASS" if play_ok else "FAIL"])
+	# restore the player's choices so QA never leaves the save dirty
+	SaveMgr.set_value("arena", arena0)
+	SaveMgr.set_value("theme", theme0)
 	SaveMgr.set_value("gfx_mode", 1)
-	hud.apply_theme(UiTheme.CLASSIC)
+	_arena_key = arena0
+	_theme_id = theme0
+	hud.set_arena(arena0)
+	hud.apply_theme(theme0)
 	print("THEMETEST done — PASS")
+	_quit_nicely()
+
+# ---------------------------------------------------------------- eat QA
+
+## Clear, obstacle-free anchor with a straight +Z runway for the eat test.
+func _eat_anchor(food) -> Vector3:
+	var cands: Array = [Vector3.ZERO]
+	for ring in 2:
+		for k in 8:
+			var ang := TAU * float(k) / 8.0
+			var rad := 10.0 + 9.0 * float(ring)
+			cands.append(Vector3(sin(ang) * rad, 0.0, cos(ang) * rad))
+	for c in cands:
+		var pos: Vector3 = c
+		var clear := true
+		for d in 8:
+			var q: Vector3 = pos + Vector3(0, 0, float(d))
+			if q.length() > float(food.arena_radius) - 8.0 \
+					or not food._clear_of_obstacles(q, 1.4):
+				clear = false
+				break
+		if clear:
+			return pos
+	return Vector3.ZERO
+
+func _eat_find(food, kind: int, at: Vector3) -> Dictionary:
+	for s in food._slots[kind]:
+		var alive: Dictionary = s["alive"]
+		for idx in alive.keys():
+			var rec: Dictionary = alive[idx]
+			if rec.has("fly"):
+				continue
+			if (rec["pos"] as Vector3).distance_to(at) < 0.05:
+				return {"slot": s, "idx": int(idx), "rec": rec}
+	return {}
+
+func _eat_in_pool(food, qa_id: int) -> bool:
+	for kind in food._slots.size():
+		for s: Dictionary in food._slots[kind]:
+			var alive: Dictionary = s["alive"]
+			for idx in alive.keys():
+				var rec: Dictionary = alive[idx]
+				if int(rec.get("qa", -1)) == qa_id:
+					return true
+	return false
+
+## Every passive fruit must be inside the safe ring, clear of obstacles and
+## separated from every other fruit. Returns the number of violations.
+func _eat_validate_court(food) -> int:
+	var bad := 0
+	var pts: Array = []
+	var gap: float = float(FoodSpawner.FRUIT_GAP) - 0.05
+	for kind in food._slots.size():
+		var rad: float = float(FoodSpawner.KIND_RADIUS[kind])
+		for s: Dictionary in food._slots[kind]:
+			var alive: Dictionary = s["alive"]
+			for idx in alive.keys():
+				var rec: Dictionary = alive[idx]
+				if rec.has("fly"):
+					continue
+				var pos: Vector3 = rec["pos"]
+				if pos.length() > float(food.arena_radius) - float(FoodSpawner.SPAWN_EDGE) + 0.05:
+					bad += 1
+				if not food._clear_of_obstacles(pos, rad):
+					bad += 1
+				for o in pts:
+					if pos.distance_squared_to(o) < gap * gap:
+						bad += 1
+				pts.append(pos)
+	return bad
+
+## Standalone long-body check (also covers the 90 m boss, longer than the
+## player's 76 m cap): the spine's tail must be a full body length BEHIND the
+## head and keep a visible radius.
+func _eat_long_probe(len_m: float, max_len: float) -> bool:
+	var s := Snake.new()
+	s.max_length = max_len
+	match_world.add_child(s)
+	s.spawn(Vector3.ZERO, Vector3(0, 0, 1), len_m)
+	s._update_spine(0.016)
+	var o := (Snake.RING_COUNT - 1) * 4
+	var head := Vector3(s._spine[0], s._spine[1], s._spine[2])
+	var tail := Vector3(s._spine[o], s._spine[o + 1], s._spine[o + 2])
+	var dist := Vector2(tail.x - head.x, tail.z - head.z).length()
+	var rad := float(s._spine[o + 3])
+	var behind: bool = (tail - head).dot(Vector3(0, 0, -1)) > 0.0
+	var ok: bool = behind and dist > len_m * 0.9 and dist < len_m * 1.1 and rad > 0.02
+	print("EATTEST long-probe len=%.0f tail=%.2f radius=%.3f behind=%s %s" % [
+		len_m, dist, rad, str(behind), "PASS" if ok else "FAIL"])
+	s.queue_free()
+	return ok
+
+## One controlled eat case. The lane is cleared of natural fruit and respawns
+## are frozen while the exact score/growth/gulp/flight are measured.
+func _eat_phase(p, food, length: float, kind: int, count: int, label: String,
+		check_respawn: bool) -> bool:
+	food.qa_freeze_respawn = true
+	var anchor := _eat_anchor(food)
+	p.spawn(anchor, Vector3(0, 0, 1), length)
+	await _frames(2)
+	food.reset()
+	await _frames(1)
+	var mouth: Vector3 = p.mouth_pos
+	var fwd: Vector3 = Vector3(sin(p.heading), 0.0, cos(p.heading))
+	# clear the reset's fruit off the test lane
+	for k in food._slots.size():
+		for s: Dictionary in food._slots[k]:
+			var alive: Dictionary = s["alive"]
+			for idx in alive.keys():
+				var rec: Dictionary = alive[idx]
+				if rec.has("fly"):
+					continue
+				var fp: Vector3 = rec["pos"]
+				if Vector2(fp.x - mouth.x, fp.z - mouth.z).length() < 6.5:
+					food._bury_idx(s, idx, k)
+	food._deficit.fill(0)
+	var made: Array = []
+	var qa_base := 1000 + int(Time.get_ticks_msec() % 1000) * 10
+	for i in count:
+		var at: Vector3 = Vector3(mouth.x, 0.0, mouth.z) + fwd * (0.45 + float(i))
+		if not food._spawn_orb(kind, at):
+			print("EATTEST %s FAIL could not place fruit %d" % [label, i])
+			food.qa_freeze_respawn = false
+			return false
+		var info := _eat_find(food, kind, at)
+		if info.is_empty():
+			print("EATTEST %s FAIL could not find fruit %d" % [label, i])
+			food.qa_freeze_respawn = false
+			return false
+		var irec: Dictionary = info["rec"]
+		irec["qa"] = qa_base + i
+		made.append(info)
+	var n0: int = food.count_alive()
+	var s0: int = p.score
+	var t0: float = p.target_length
+	var g0: int = p.gulp_count
+	var claimed := {}
+	var claim_ms := {}
+	for f in 300:
+		await get_tree().physics_frame
+		for i in made.size():
+			if claimed.has(i):
+				continue
+			var rec: Dictionary = made[i]["rec"]
+			if rec.has("fly"):
+				claimed[i] = true
+				claim_ms[i] = Time.get_ticks_msec()
+		if claimed.size() == made.size():
+			break
+	var ds: int = p.score - s0
+	var dt: float = p.target_length - t0
+	var want_score := 0
+	var want_growth := 0.0
+	if kind < 3:
+		want_score = int(FoodSpawner.KIND_SCORE[kind]) * count
+		want_growth = float(FoodSpawner.KIND_GROWTH[kind]) * float(count)
+	var claimed_ok: bool = claimed.size() == made.size()
+	var score_ok: bool = ds == want_score
+	var growth_ok: bool = absf(dt - want_growth) < 0.001
+	var power_ok := true
+	if kind == 3:
+		power_ok = p.ability != "" and p.ability_left > 0.0
+	var buried := {}
+	var burial_ms := {}
+	for f in 300:
+		await get_tree().physics_frame
+		for i in made.size():
+			if buried.has(i):
+				continue
+			var qid: int = int((made[i]["rec"] as Dictionary).get("qa", -1))
+			if not _eat_in_pool(food, qid):
+				buried[i] = true
+				burial_ms[i] = Time.get_ticks_msec()
+		if buried.size() == made.size():
+			break
+	var gulp_ok: bool = p.gulp_count - g0 == count
+	var flight_ok := true
+	var transform_ok := true
+	for i in made.size():
+		if not buried.has(i) or not claim_ms.has(i):
+			flight_ok = false
+			continue
+		var elapsed: int = int(burial_ms[i]) - int(claim_ms[i])
+		if elapsed < 80:
+			flight_ok = false
+		var slot: Dictionary = made[i]["slot"]
+		var idx: int = int(made[i]["idx"])
+		var mm: MultiMesh = slot["mm"]
+		if mm.get_instance_transform(idx).origin.y > -10.0:
+			transform_ok = false
+	# After the claims the lane is clear and respawn is frozen, so any extra
+	# $10 would be exactly the double-count bug this check exists to catch.
+	await _frames(20)
+	var no_double: bool = p.score - s0 == ds \
+		and absf((p.target_length - t0) - dt) < 0.001
+	var respawn_ok := true
+	var court_bad := 0
+	if check_respawn:
+		food.qa_freeze_respawn = false
+		var seen := false
+		for f in 240:
+			await get_tree().physics_frame
+			if food.count_alive() >= n0:
+				seen = true
+				break
+		respawn_ok = seen
+		court_bad = _eat_validate_court(food)
+		food.qa_freeze_respawn = true
+	else:
+		respawn_ok = food.count_alive() == n0 - made.size()
+	var ok: bool = claimed_ok and score_ok and growth_ok \
+		and power_ok and gulp_ok and flight_ok and transform_ok and no_double \
+		and respawn_ok and court_bad == 0
+	print("EATTEST %s len=%.0f kind=%d n=%d ds=%d/%d dt=%.2f/%.2f gulp=%d/%d fly=%s double=%s respawn=%s court=%d %s" % [
+		label, length, kind, count, ds, want_score, dt, want_growth,
+		p.gulp_count - g0, count, str(flight_ok), str(no_double),
+		str(respawn_ok), court_bad, "PASS" if ok else "FAIL"])
+	return ok
+
+func _eat_test_run() -> void:
+	print("EATTEST start")
+	var mode0 := _gfx_mode
+	_start_play()
+	match_world.no_death = true
+	if _gfx_mode != 1:
+		hud.mode_changed.emit(1)   # the "3D" cases must really run in 3D
+		await _frames(6)
+	var p = match_world.player
+	var food = match_world.food
+	p.autopilot = false
+	p.touch_sim = false
+	p.keyboard_only = true
+	p.no_idle_drift = true
+	await _frames(10)
+	var pass_all := true
+	# growth-driven speed: smooth, monotonic, capped at 46 m / 6.2 m/s
+	var last := -1.0
+	var speed_ok := true
+	for L in [8.0, 12.0, 20.0, 30.0, 40.0, 46.0, 50.0, 64.0, 76.0]:
+		p.spawn(Vector3.ZERO, Vector3(0, 0, 1), L)
+		var v: float = p.base_speed()
+		print("EATTEST speed L=%.0f v=%.3f" % [L, v])
+		if v < last - 0.0001 or v > Snake.SPEED_MAX + 0.0001:
+			speed_ok = false
+		if L >= 46.0 and absf(v - Snake.SPEED_MAX) > 0.002:
+			speed_ok = false
+		last = v
+	print("EATTEST speed-curve %s" % ("PASS" if speed_ok else "FAIL"))
+	# tail integrity in both the live 3D/2D worlds and at the 90 m boss length
+	pass_all = pass_all and speed_ok
+	pass_all = pass_all and _eat_long_probe(90.0, 90.0)
+	# basic / rare / golden / power orb, normal length
+	var r1: bool = await _eat_phase(p, food, 12.0, 0, 1, "basic-3d", true)
+	var r2: bool = await _eat_phase(p, food, 12.0, 1, 1, "rare-3d", false)
+	var r3: bool = await _eat_phase(p, food, 20.0, 2, 1, "golden-3d", false)
+	var r4: bool = await _eat_phase(p, food, 20.0, 3, 1, "power-3d", false)
+	# large/fast body: three basic fruit in one pass, exact 30 / +1.5
+	var r5: bool = await _eat_phase(p, food, 50.0, 0, 3, "multi-fast", false)
+	pass_all = pass_all and r1 and r2 and r3 and r4 and r5
+	# live 76 m tail, 3D
+	p.spawn(_eat_anchor(food), Vector3(0, 0, 1), 76.0)
+	await _frames(2)
+	var o := (Snake.RING_COUNT - 1) * 4
+	var head := Vector3(p._spine[0], p._spine[1], p._spine[2])
+	var tail := Vector3(p._spine[o], p._spine[o + 1], p._spine[o + 2])
+	var live_dist := Vector2(tail.x - head.x, tail.z - head.z).length()
+	var live_rad := float(p._spine[o + 3])
+	var live_ok: bool = live_dist > 76.0 * 0.9 and live_rad > 0.02
+	print("EATTEST live-tail-3d len=%.1f tail=%.2f radius=%.3f %s" % [
+		p.length, live_dist, live_rad, "PASS" if live_ok else "FAIL"])
+	pass_all = pass_all and live_ok
+	# actual 2D switch: existing fruit must still be valid + one more eat
+	hud.mode_changed.emit(0)
+	await _frames(10)
+	var court_before := _eat_validate_court(food)
+	print("EATTEST 2d-switch court-invalid=%d %s" % [
+		court_before, "PASS" if court_before == 0 else "FAIL"])
+	pass_all = pass_all and court_before == 0
+	var r6: bool = await _eat_phase(p, food, 20.0, 0, 1, "basic-2d", false)
+	pass_all = pass_all and r6
+	p.spawn(_eat_anchor(food), Vector3(0, 0, 1), 76.0)
+	await _frames(2)
+	var head2 := Vector3(p._spine[0], p._spine[1], p._spine[2])
+	var tail2 := Vector3(p._spine[o], p._spine[o + 1], p._spine[o + 2])
+	var live2 := Vector2(tail2.x - head2.x, tail2.z - head2.z).length()
+	var live2_ok: bool = live2 > 76.0 * 0.9 and float(p._spine[o + 3]) > 0.02
+	print("EATTEST live-tail-2d len=%.1f tail=%.2f radius=%.3f %s" % [
+		p.length, live2, float(p._spine[o + 3]), "PASS" if live2_ok else "FAIL"])
+	pass_all = pass_all and live2_ok
+	# final fresh court: every natural spawn valid + reachable
+	food.qa_freeze_respawn = false
+	food.reset()
+	await _frames(60)
+	var court_final := _eat_validate_court(food)
+	var n_final: int = food.count_alive()
+	print("EATTEST final-court invalid=%d count=%d %s" % [
+		court_final, n_final, "PASS" if court_final == 0 and n_final >= 40 else "FAIL"])
+	pass_all = pass_all and court_final == 0 and n_final >= 40
+	hud.mode_changed.emit(mode0)
+	await get_tree().process_frame
+	print("EATTEST done — %s" % ("PASS" if pass_all else "FAIL"))
 	_quit_nicely()
 
 # ---------------------------------------------------------------- power QA
@@ -1013,6 +1407,12 @@ func _show_game_scene() -> void:
 	elif match_world.arena_key != _arena_key:
 		# arena changed while the player was in the menu: rebuild now
 		_recreate_world()
+	elif match_world.dark != (_theme_id == UiTheme.DARK) \
+			or match_world.gfx_mode != _gfx_mode:
+		# The menu is mode/theme-agnostic, so a selection made there must be
+		# applied to a reused world. Without this, changing THEME or VIEW on
+		# the main menu after a previous run silently played the old look.
+		match_world.restyle(_theme_id == UiTheme.DARK, _gfx_mode == 0)
 	match_world.visible = true
 	match_world.process_mode = Node.PROCESS_MODE_INHERIT
 
@@ -1319,9 +1719,13 @@ func _camera_2d_topdown(delta: float) -> void:
 	# screen still fills without starving horizontal visibility.
 	var mobile := OS.get_name() == "Android" or OS.get_name() == "iOS"
 	var span := (19.5 if mobile else 20.5) * clampf(1.30 / maxf(aspect, 0.62), 1.0, 1.22)
-	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * maxf(Snake.BOOST_MULT - 1.0, 0.1)), 0.0, 1.0)
-	var length_k := clampf((p.length - 8.0) / 42.0, 0.0, 1.0)
-	span *= 1.0 + 0.08 * boost_k + 0.07 * length_k
+	# Boost is the EXCESS over this snake's growth-driven cruise speed, not over
+	# the base constant: otherwise a long (already faster) snake fakes a boost
+	# kick on every frame. Length itself only widens the frame a little.
+	var cruise: float = maxf(p.base_speed(), 0.1)
+	var boost_k := clampf((p.speed_cur - cruise) / (cruise * maxf(Snake.BOOST_MULT - 1.0, 0.1)), 0.0, 1.0)
+	var length_k := clampf((p.length - 8.0) / 56.0, 0.0, 1.0)
+	span *= 1.0 + 0.08 * boost_k + 0.12 * length_k
 	cam.size = lerpf(cam.size if cam.size > 0.1 else span, span, 1.0 - exp(-2.5 * delta))
 	# follow the head with a touch of look-ahead. The camera may wander only
 	# ~72% of a half-screen past the arena edge, so the board keeps filling the
@@ -1356,9 +1760,12 @@ func _camera_3d_tps(delta: float) -> void:
 	var head := p.head_pos
 	_player_last_head = head
 	cam.projection = Camera3D.PROJECTION_PERSPECTIVE
-	var boost_k := clampf((p.speed_cur - Snake.BASE_SPEED) / (Snake.BASE_SPEED * (Snake.BOOST_MULT - 1.0)), 0.0, 1.0)
-	var len_k := clampf((p.length - 8.0) / 42.0, 0.0, 1.0)
-	var dist := 12.6 + len_k * 2.4
+	var cruise: float = maxf(p.base_speed(), 0.1)
+	var boost_k := clampf((p.speed_cur - cruise) / (cruise * (Snake.BOOST_MULT - 1.0)), 0.0, 1.0)
+	var len_k := clampf((p.length - 8.0) / 56.0, 0.0, 1.0)
+	# pull back with growth so the trailing body stays in frame longer; a 76 m
+	# serpent is still a close chase, just with enough context to read its tail.
+	var dist := 12.6 + len_k * 4.2
 	# low cinematic chase: ~22° pitch behind the serpent — the court stretches
 	# into a visible horizon with a sky band, objects occlude each other and
 	# the coiled body shows real volume. The compass yaw stays FIXED (see the

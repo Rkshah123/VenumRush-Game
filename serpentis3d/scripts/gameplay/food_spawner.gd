@@ -25,7 +25,10 @@ const FRUIT_TILT := 0.60  # ~34° camera-facing lean: silhouette readable top-do
 const BOB_BASE := [0.34, 0.34, 0.34, 0.52]
 const BOB_AMP := [0.07, 0.07, 0.07, 0.13]
 const BOB_SPD := [2.0, 2.0, 2.0, 3.4]
-const FLY_TIME := 0.22  # seconds of the eat-flight into the mouth
+const FLY_TIME := 0.13  # min seconds of the eat-flight into the mouth
+const FLY_TIME_MAX := 0.5
+const SPAWN_EDGE := 4.5   # keep fruit comfortably inside the death barrier
+const FRUIT_GAP := 0.9    # minimum centre distance between two fruits
 var _bob_frame := 0     # transform-refresh counter for the throttled bob pass
 
 # Variant table per kind. For real foods: path + pool capacity + spawn weight
@@ -80,6 +83,7 @@ var _pop_hits := 0
 # ---------------------------------------------------------------- lifecycle
 
 var hard_cap := HARD_CAP   # effective budget; phones run ~2/3 of it
+var qa_freeze_respawn := false   # dev harness: isolate one eat case
 
 func _ready() -> void:
 	if OS.get_name() == "Android" or OS.get_name() == "iOS":
@@ -174,7 +178,8 @@ func reset() -> void:
 	for kind in KIND_TARGETS.size():
 		_deficit[kind] = 0
 		for i in KIND_TARGETS[kind]:
-			_spawn_orb(kind)
+			if not _spawn_orb(kind):
+				_deficit[kind] += 1
 
 func count_alive() -> int:
 	# ground truth: sum of live slot records across every variant pool
@@ -205,48 +210,137 @@ func debug_state() -> String:
 func drop_orb(kind: int, pos: Vector3) -> void:
 	if _total >= hard_cap:
 		return
-	_spawn_orb(kind, pos)
+	# Death drops originate on a body station: keep them inside the playable
+	# disc and push them out of boulders/trees. A fruit hidden INSIDE a rock is
+	# the classic "left behind, cannot be eaten" report.
+	var p := Vector3(pos.x, 0.0, pos.z).limit_length(arena_radius - SPAWN_EDGE)
+	var drop_ok := _clear_of_obstacles(p, KIND_RADIUS[kind])
+	for attempt in 7:
+		if drop_ok:
+			break
+		var inward := -p.normalized() if p.length_squared() > 0.01 else Vector3.FORWARD
+		p += inward * 1.4
+		p = p.limit_length(arena_radius - SPAWN_EDGE)
+		drop_ok = _clear_of_obstacles(p, KIND_RADIUS[kind])
+	if not drop_ok:
+		return
+	_spawn_orb(kind, p)
 
-func _pick_variant(kind: int) -> int:
+## Weighted pick among variants that still have a free instance. The old pick
+## could land on a full pool and silently lose the respawn entirely.
+func _pick_variant(kind: int, pools: Array) -> int:
 	var table: Array = VAR_TABLE[kind]
-	var roll := randf() * 1.0
+	var total_w := 0.0
+	for i in table.size():
+		if not (pools[i]["free"] as Array).is_empty():
+			total_w += float(table[i]["w"])
+	if total_w <= 0.0:
+		return -1
+	var roll := randf() * total_w
 	var acc := 0.0
 	for i in table.size():
+		if (pools[i]["free"] as Array).is_empty():
+			continue
 		acc += float(table[i]["w"])
 		if roll <= acc:
 			return i
-	return table.size() - 1
+	return -1
 
-func _spawn_orb(kind: int, at: Vector3 = Vector3.INF) -> void:
+func _spawn_orb(kind: int, at: Vector3 = Vector3.INF) -> bool:
 	if _total >= hard_cap:
-		return
+		return false
 	var pools: Array = _slots[kind]
-	var vi := _pick_variant(kind)
+	var vi := _pick_variant(kind, pools)
+	if vi < 0:
+		return false
 	var s: Dictionary = pools[vi]
 	var free: Array[int] = s["free"]
 	if free.is_empty():
-		return
+		return false
 	var r: float = KIND_RADIUS[kind]
 	var pos := at
 	if pos == Vector3.INF:
-		for attempt in 5:
-			var ang := randf() * TAU
-			var rad := sqrt(randf()) * (arena_radius - 4.0)
-			pos = Vector3(sin(ang) * rad, 0, cos(ang) * rad)
-			if _clear_of_obstacles(pos, r):
-				break
+		pos = _pick_spawn_pos(r)
+		if pos == Vector3.INF:
+			return false
+	else:
+		pos.y = 0.0
+		if not _clear_of_obstacles(pos, r) or pos.length() > arena_radius - 2.0:
+			return false
 	var idx: int = free.pop_back()
-	(s["alive"] as Dictionary)[idx] = {"pos": pos, "phase": randf() * TAU, "kind": kind, "born": t_now()}
+	(s["alive"] as Dictionary)[idx] = {
+		"pos": pos, "phase": randf() * TAU, "kind": kind, "born": t_now()}
 	_total += 1
+	return true
+
+## Random disc sampling with a guaranteed-clear fallback scan. A rejected
+## candidate never becomes fruit: every orb the player sees is on open ground,
+## inside the arena, and separated from other orbs.
+func _pick_spawn_pos(r: float) -> Vector3:
+	var best := Vector3.INF
+	var best_clear := -999.0
+	for attempt in 14:
+		var ang := randf() * TAU
+		var rad := sqrt(randf()) * (arena_radius - SPAWN_EDGE)
+		var pos := Vector3(sin(ang) * rad, 0.0, cos(ang) * rad)
+		var cl := _obstacle_clearance(pos, r)
+		if cl > best_clear:
+			best_clear = cl
+			best = pos
+		if cl >= 1.0 and _clear_of_fruits(pos, r):
+			return pos
+	# spiral fallback: deterministic open bands, no infinite retry loop
+	for ring in 5:
+		var rad: float = arena_radius * (0.22 + 0.145 * float(ring))
+		var steps := 20 + ring * 8
+		var off := randf() * TAU
+		for k in steps:
+			var ang := off + TAU * float(k) / float(steps)
+			var pos := Vector3(sin(ang) * rad, 0.0, cos(ang) * rad)
+			if _obstacle_clearance(pos, r) >= 1.0 and _clear_of_fruits(pos, r):
+				return pos
+	return Vector3.INF
+
+func _obstacle_clearance(pos: Vector3, r: float) -> float:
+	var cl := 99.0
+	for ob in obstacles:
+		var d := pos.distance_to(ob["pos"] as Vector3) - float(ob["r"]) - r - 1.5
+		cl = minf(cl, d)
+	return cl
+
+func _clear_of_obstacles(pos: Vector3, r: float) -> bool:
+	return _obstacle_clearance(pos, r) >= 0.0
+
+func _clear_of_fruits(pos: Vector3, _r: float) -> bool:
+	var gap2 := FRUIT_GAP * FRUIT_GAP
+	for kind in _slots.size():
+		for s: Dictionary in _slots[kind]:
+			var alive: Dictionary = s["alive"]
+			for idx in alive.keys():
+				if (alive[idx]["pos"] as Vector3).distance_squared_to(pos) < gap2:
+					return false
+	return true
 
 func t_now() -> float:
 	return Time.get_ticks_msec() * 0.001
 
-func _clear_of_obstacles(pos: Vector3, r: float) -> bool:
-	for ob in obstacles:
-		if pos.distance_to(ob["pos"]) < (float(ob["r"]) + r + 1.5):
-			return false
-	return true
+## A live theme/mode switch rebuilds the arena, so the obstacle list can change
+## under fruit that was already on the ground. Re-check every passive fruit
+## against the NEW obstacles/arena and retire any that is now buried in a rock
+## or outside the safe ring; the normal deficit logic respawns it on open
+## ground. Flying fruit is already claimed and is left alone.
+func revalidate_spawns() -> void:
+	for kind in _slots.size():
+		for s: Dictionary in _slots[kind]:
+			var alive: Dictionary = s["alive"]
+			for idx in alive.keys():
+				var rec: Dictionary = alive[idx]
+				if rec.has("fly"):
+					continue
+				var pos: Vector3 = rec["pos"]
+				if pos.length() > arena_radius - SPAWN_EDGE \
+						or not _clear_of_obstacles(pos, KIND_RADIUS[kind]):
+					_bury_idx(s, idx, kind)
 
 func alive_positions() -> Array:
 	var out: Array = []
@@ -259,25 +353,44 @@ func alive_positions() -> Array:
 					out.append(rec["pos"])
 	return out
 
-func eat_hits(head_pos: Vector3, reach: float) -> Array:
-	# All fruits in reach of a snake head: [{pos: Vector3, kind: int}]
-	# Records already flying into a mouth are skipped.
+## All edible fruits whose GROUND position is within `reach` of the swept
+## segment from -> to (the snake's mouth at the previous/current eat tick).
+## Sweeping is what lets a fast head (and a 30 Hz eat tick) collect every fruit
+## it visibly crosses. Returns the actual pool records: MatchWorld hands them
+## straight back to fly_rec(), so there is no position lookup that could pick
+## the wrong fruit or double-count one.
+func eat_hits_sweep(from: Vector3, to: Vector3, reach: float) -> Array:
 	var out: Array = []
+	var sx := to.x - from.x
+	var sz := to.z - from.z
+	var seg_len2 := sx * sx + sz * sz
 	for kind in _slots.size():
 		for s: Dictionary in _slots[kind]:
 			var alive: Dictionary = s["alive"]
 			var rr: float = reach + float(kind) * 0.03 + KIND_RADIUS[kind] * 0.5
+			var rr2 := rr * rr
 			for idx in alive.keys():
 				var rec: Dictionary = alive[idx]
 				if rec.has("fly"):
 					continue
-				var op: Vector3 = (rec["pos"] as Vector3) + Vector3.UP * 0.55
-				if head_pos.distance_to(op) < rr:
-					out.append({"pos": rec["pos"], "kind": kind})
+				var p: Vector3 = rec["pos"]
+				var qx := from.x
+				var qz := from.z
+				if seg_len2 > 0.000001:
+					var t := clampf(((p.x - from.x) * sx + (p.z - from.z) * sz) / seg_len2, 0.0, 1.0)
+					qx = from.x + sx * t
+					qz = from.z + sz * t
+				# Degenerate segment (a freshly spawned/settled mouth): test the
+				# POINT from, never each fruit against itself. The old fallback
+				# turned every fruit in the arena into a hit on a spawn frame.
+				var dx := p.x - qx
+				var dz := p.z - qz
+				if dx * dx + dz * dz < rr2:
+					out.append({"rec": rec, "pos": p, "kind": kind})
 	return out
 
 func remove_orb_at_pos(kind: int, pos: Vector3) -> bool:
-	# removes ONE fruit of this kind at pos (match_world does exact lookups).
+	# removes ONE fruit of this kind at pos (kept for dev tooling).
 	var pools: Array = _slots[kind]
 	for s: Dictionary in pools:
 		var alive: Dictionary = s["alive"]
@@ -289,19 +402,23 @@ func remove_orb_at_pos(kind: int, pos: Vector3) -> bool:
 				return true
 	return false
 
-func fly_orb_at_pos(kind: int, pos: Vector3, eater: Node3D) -> bool:
-	# Eating animation (spec §4): the fruit arcs into the eater's mouth, then
-	# buries + pops INSIDE the bite. Budget accounting happens on landing so
-	# HARD_CAP and deficits stay exact (score was already counted once).
-	var pools: Array = _slots[kind]
-	for s: Dictionary in pools:
-		var alive: Dictionary = s["alive"]
-		for idx in alive.keys():
-			var rec: Dictionary = alive[idx]
-			if not rec.has("fly") and (rec["pos"] as Vector3).distance_squared_to(pos) < 0.02:
-				rec["fly"] = {"t": 0.0, "from": rec["pos"], "snake": eater}
-				return true
-	return false
+## Start the eat-flight for an EXACT record returned by eat_hits_sweep. The
+## flight starts at the fruit's current rendered position and ends at the
+## eater's live mouth, so the hand-off is seamless (no "fruit teleports to a
+## point above the head" artefact) and the bite happens where the player sees it.
+func fly_rec(rec: Dictionary, eater: Node3D) -> bool:
+	if rec.has("fly"):
+		return false
+	var kind := int(rec["kind"])
+	var from: Vector3 = rec.get("vis", (rec["pos"] as Vector3) + Vector3.UP * (BOB_BASE[kind] + 0.18))
+	rec["fly"] = {"t": 0.0, "from": from, "snake": eater,
+		"dur": clampf(from.distance_to(_mouth_of(eater)) * 0.085, FLY_TIME, FLY_TIME_MAX)}
+	return true
+
+func _mouth_of(snake) -> Vector3:
+	if snake != null and is_instance_valid(snake):
+		return Vector3(snake.mouth_pos) + Vector3.UP * 0.18
+	return Vector3.ZERO
 
 func _bury_idx(s: Dictionary, idx: int, kind: int) -> void:
 	var alive: Dictionary = s["alive"]
@@ -352,26 +469,31 @@ func _process(delta: float) -> void:
 			for idx in alive.keys():
 				var rec: Dictionary = alive[idx]
 				if rec.has("fly"):
-					# --- eat-flight: arc into the eater's mouth, shrink + spin ---
+					# --- eat-flight: drawn into the live MOUTH, then gulp ---
 					var fly: Dictionary = rec["fly"]
 					var snake = fly["snake"]   # untyped: may already be freed
 					fly["t"] = float(fly["t"]) + delta
-					var q: float = clampf(float(fly["t"]) / FLY_TIME, 0.0, 1.0)
+					var dur: float = maxf(float(fly.get("dur", FLY_TIME)), 0.05)
+					var q: float = clampf(float(fly["t"]) / dur, 0.0, 1.0)
 					if not is_instance_valid(snake):
 						_bury_idx(s, idx, kind)
 						continue
-					var target: Vector3 = snake.head_pos + Vector3.UP * 0.30
+					var target: Vector3 = _mouth_of(snake)
 					var from: Vector3 = fly["from"]
-					var e := q * q  # ease-in: starts on the ground, accelerates to the bite
-					var p := from.lerp(target, e) + Vector3.UP * (0.55 * sin(q * PI))
-					var yaw := q * 9.0 + float(rec["phase"])
-					var sc := 1.0 - 0.85 * e
+					var e := smoothstep(0.0, 1.0, q)   # snap toward the jaws
+					var p := from.lerp(target, e)
+					p += Vector3.UP * (0.28 * sin(q * PI))
+					var yaw := q * 5.0 + float(rec["phase"])
+					# hold full size until it reaches the mouth, then vanish
+					var sc := 1.0 - 0.90 * smoothstep(0.45, 1.0, q)
 					mm.set_instance_transform(idx, Transform3D(
 						Basis(Vector3.UP, yaw).scaled(Vector3(sc, sc, sc)), p))
 					if q >= 1.0:
-						var head := target
 						_bury_idx(s, idx, kind)
-						pop_at(head - Vector3.UP * 0.1, kind)
+						pop_at(target - Vector3.UP * 0.16, kind)
+						# visible gulp AFTER the fruit lands, not on first touch
+						if snake.has_method("swallow"):
+							snake.swallow()
 					continue
 				if not bob_tick:
 					continue   # passive orb: transform refresh at the throttled rate
@@ -396,12 +518,16 @@ func _process(delta: float) -> void:
 					basis = (Basis(Vector3.UP, yaw) * Basis(Vector3(1, 0, 0), FRUIT_TILT)) \
 						.scaled(Vector3(sc, sc, sc))
 					yy += float(s["sink"])
-				mm.set_instance_transform(idx, Transform3D(basis, p + Vector3(0.0, yy, 0.0)))
-	# trickle respawn (top: 1 per frame) — also respects the global budget
+				var vis := p + Vector3(0.0, yy, 0.0)
+				rec["vis"] = vis
+				mm.set_instance_transform(idx, Transform3D(basis, vis))
+	# trickle respawn (top: 1 per frame) — also respects the global budget.
+	# Only consume the deficit when a valid spot was actually found; otherwise
+	# the count could silently fall below the target forever.
 	for kind in KIND_TARGETS.size():
-		if _deficit[kind] > 0 and _total < hard_cap:
-			_deficit[kind] -= 1
-			_spawn_orb(kind)
+		if _deficit[kind] > 0 and _total < hard_cap and not qa_freeze_respawn:
+			if _spawn_orb(kind):
+				_deficit[kind] -= 1
 			break
 
 # ---------------------------------------------------------------- fruit meshes

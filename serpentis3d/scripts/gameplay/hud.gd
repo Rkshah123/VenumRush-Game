@@ -35,6 +35,8 @@ var _preview_vp: SubViewport = null
 var _preview_cam: Camera3D = null
 var _preview_yaw := 0.0
 var _arena_label: Label
+var _arena_sub: Label
+var _theme_sub: Label
 var _pause_btn: Button = null
 var _quit_panel: PanelContainer = null
 var _pause_settings := false
@@ -495,6 +497,9 @@ func _build_menu() -> void:
 	_play_btn = null
 	_rec_best_lab = null
 	_rec_len_lab = null
+	_arena_label = null
+	_arena_sub = null
+	_theme_sub = null
 
 	_ui_s = _ui_scale()
 	var vs := get_viewport().get_visible_rect().size
@@ -523,7 +528,9 @@ func _build_menu() -> void:
 	_menu_column.offset_left = m_side
 	_menu_column.offset_right = -m_side
 	_menu_column.offset_top = maxf(14.0, vs.y * (0.03 if land else 0.04))
-	_menu_column.offset_bottom = maxf(14.0, vs.y * (0.045 if land else 0.05))
+	# Negative = inset from the bottom edge. The old positive value pushed the
+	# card INTO the device safe-area/taskbar strip and left only ~8 px of air.
+	_menu_column.offset_bottom = -maxf(14.0, vs.y * (0.045 if land else 0.05))
 
 	# ---------------------------------------------------------- brand block
 	var brand := VBoxContainer.new()
@@ -533,17 +540,17 @@ func _build_menu() -> void:
 	logo.texture = load("res://icon.png")
 	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	var logo_px := (104.0 if land else 128.0) * _ui_s
+	var logo_px := (120.0 if land else 140.0) * _ui_s
 	logo.custom_minimum_size = Vector2(logo_px, logo_px)
 	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	brand.add_child(logo)
 	_menu_logo = logo
-	var title := _mk_label("SERPENTIS 3D", int((42 if land else 48) * _ui_s), "accent", brand)
+	var title := _mk_label("SERPENTIS 3D", int((48 if land else 52) * _ui_s), "accent", brand)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_color_override("font_shadow_color", UiTheme.c("title_shadow"))
 	title.add_theme_constant_override("shadow_offset_y", 4)
 	_menu_title = title
-	var tag := _mk_label("Evolve. Hunt. Dominate.", int(16 * _ui_s), "dim", brand)
+	var tag := _mk_label("Evolve. Hunt. Dominate.", int(18 * _ui_s), "dim", brand)
 	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	# personal records: quiet identity line under the tagline
 	var rec := HBoxContainer.new()
@@ -556,62 +563,34 @@ func _build_menu() -> void:
 
 	# ---------------------------------------------------------- action stack
 	var act := VBoxContainer.new()
-	act.add_theme_constant_override("separation", int(9 * _ui_s))
+	act.add_theme_constant_override("separation", int(10 * _ui_s))
+	act.alignment = BoxContainer.ALIGNMENT_CENTER
 	_menu_main = VBoxContainer.new()
-	_menu_main.add_theme_constant_override("separation", int(9 * _ui_s))
+	_menu_main.add_theme_constant_override("separation", int(10 * _ui_s))
 	act.add_child(_menu_main)
-	# dominant primary + full-width secondary actions (spec section 3)
+	# One dominant primary action, then full-width secondary actions: every
+	# label keeps a huge, easy-to-hit slab instead of shrinking into a grid.
 	_play_btn = _menu_button(_menu_main, "PLAY", func(): play_pressed.emit(), true)
 	_menu_button(_menu_main, "SNAKES", func(): _menu_page("skins"))
 	_menu_button(_menu_main, "HOW TO PLAY", func(): _menu_page("help"))
 	_menu_button(_menu_main, "SETTINGS", func(): _swap_menu(false))
 	_menu_button(_menu_main, "QUIT", func(): quit_pressed.emit())
-	if land:
-		# compact selector strip: arena pager + mode + sound side by side
-		var q1 := HBoxContainer.new()
-		q1.alignment = BoxContainer.ALIGNMENT_CENTER
-		q1.add_theme_constant_override("separation", 6)
-		_menu_main.add_child(q1)
-		_arena_row_into(q1, true)
-		var q2 := HBoxContainer.new()
-		q2.alignment = BoxContainer.ALIGNMENT_CENTER
-		q2.add_theme_constant_override("separation", 8)
-		_menu_main.add_child(q2)
-		_option_button(q2, "2D", "gfx_mode", 0, func(): _set_mode(0))
-		_option_button(q2, "3D", "gfx_mode", 1, func(): _set_mode(1))
-		_option_button(q2, "SOUND ON", "muted", 0, func(): _set_muted(0))
-		_option_button(q2, "SOUND OFF", "muted", 1, func(): _set_muted(1))
-		var kids := q2.get_children()
-		for k: Button in kids:
-			k.custom_minimum_size = Vector2(0, 46.0 * _ui_s)
-			k.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var hint := _mk_label("", int(12 * _ui_s), "dim", _menu_main)
-		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		hint.text = "mouse steers, LMB boosts" if not _is_touch_device() else "drag steers, 2nd finger boosts"
-		hint.text = "OFFLINE BUILD v0.1 - " + hint.text
-	else:
-		# portrait: labelled selector rows, generous spacing
-		var arena_tag := _mk_label("ARENA", int(12 * _ui_s), "dim", _menu_main)
-		arena_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		_arena_row_into(_menu_main, false)
-		var mode_tag := _mk_label("MODE", int(11 * _ui_s), "dim", _menu_main)
-		mode_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		var mrow := HBoxContainer.new()
-		mrow.alignment = BoxContainer.ALIGNMENT_CENTER
-		mrow.add_theme_constant_override("separation", 8)
-		_menu_main.add_child(mrow)
-		_option_button(mrow, "2D TOP-DOWN", "gfx_mode", 0, func(): _set_mode(0))
-		_option_button(mrow, "3D TPS", "gfx_mode", 1, func(): _set_mode(1))
-		var srow := HBoxContainer.new()
-		srow.alignment = BoxContainer.ALIGNMENT_CENTER
-		srow.add_theme_constant_override("separation", 8)
-		_menu_main.add_child(srow)
-		_option_button(srow, "SOUND ON", "muted", 0, func(): _set_muted(0))
-		_option_button(srow, "SOUND OFF", "muted", 1, func(): _set_muted(1))
-		var hint := _mk_label("", int(12 * _ui_s), "dim", _menu_main)
-		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		hint.text = "mouse steers, LMB boosts" if not _is_touch_device() else "drag steers, 2nd finger boosts"
-		hint.text = "OFFLINE BUILD v0.1 - " + hint.text
+
+	# ------------------------------------------------ arena + theme sections
+	# Two SEPARATE labelled panels, each with its own controls and selected
+	# state. They never touch each other's save key: switching theme cannot
+	# reset the arena and switching arena cannot reset the theme.
+	var sel_row := HBoxContainer.new()
+	sel_row.add_theme_constant_override("separation", int(10 * _ui_s))
+	sel_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_menu_main.add_child(sel_row)
+	_build_arena_section(sel_row)
+	_build_theme_section(sel_row)
+
+	var hint := _mk_label("", int(13 * _ui_s), "dim", _menu_main)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint.text = "mouse steers, LMB boosts" if not _is_touch_device() else "drag steers, 2nd finger boosts"
+	hint.text = "OFFLINE BUILD v0.1 - " + hint.text
 
 	# ---------------------------------------------------------- orientation
 	# The action column sits on a soft themed card so every page — SNAKES, HOW
@@ -620,10 +599,10 @@ func _build_menu() -> void:
 	var act_card := PanelContainer.new()
 	var act_sb := _panel_style(0.55)
 	act_sb.set_corner_radius_all(18)
-	act_sb.content_margin_left = 14
-	act_sb.content_margin_right = 14
-	act_sb.content_margin_top = 12
-	act_sb.content_margin_bottom = 14
+	act_sb.content_margin_left = 20 * _ui_s
+	act_sb.content_margin_right = 20 * _ui_s
+	act_sb.content_margin_top = 16 * _ui_s
+	act_sb.content_margin_bottom = 16 * _ui_s
 	act_card.add_theme_stylebox_override("panel", act_sb)
 	if not _tpanels.has(act_sb):
 		_tpanels.append(act_sb)
@@ -638,7 +617,8 @@ func _build_menu() -> void:
 		brand.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		page.add_child(brand)
 		page.add_child(act_card)
-		act_card.custom_minimum_size = Vector2(clampf(vs.x * 0.46, 380.0 * _ui_s, 740.0), 0.0)
+		page.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		act_card.custom_minimum_size = Vector2(clampf(vs.x * 0.52, 420.0 * _ui_s, 980.0 * _ui_s), 0.0)
 		act_card.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	else:
 		_menu_column.add_child(brand)
@@ -660,6 +640,13 @@ func _build_settings_page(act: Container) -> void:
 	_menu_settings.add_theme_constant_override("separation", int(9 * _ui_s))
 	act.add_child(_menu_settings)
 	_menu_settings.visible = false
+	var head := _mk_label("SETTINGS", int(30 * _ui_s), "accent", _menu_settings)
+	head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var sub := _mk_label("AUDIO  ·  LOOK  ·  CONTROL", int(12 * _ui_s), "dim", _menu_settings)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(0, int(4 * _ui_s))
+	_menu_settings.add_child(gap)
 	var svl := _mk_label("MASTER VOLUME", int(15 * _ui_s), "dim", _menu_settings)
 	var slider := HSlider.new()
 	slider.min_value = 0.0
@@ -700,29 +687,103 @@ func _build_settings_page(act: Container) -> void:
 	_menu_settings.add_child(grow)
 	_option_button(grow, "2D TOP-DOWN", "gfx_mode", 0, func(): _set_mode(0))
 	_option_button(grow, "3D TPS", "gfx_mode", 1, func(): _set_mode(1))
+	# Sound lives here now that the main menu is reserved for the two big
+	# selection sections. Same save key / same bus mute as before.
+	var sndl := _mk_label("SOUND", int(15 * _ui_s), "dim", _menu_settings)
+	var srow := HBoxContainer.new()
+	srow.alignment = BoxContainer.ALIGNMENT_CENTER
+	srow.add_theme_constant_override("separation", 8)
+	_menu_settings.add_child(srow)
+	_option_button(srow, "SOUND ON", "muted", 0, func(): _set_muted(0))
+	_option_button(srow, "SOUND OFF", "muted", 1, func(): _set_muted(1))
 	_menu_button(_menu_settings, "BACK", func(): _swap_menu(true))
 
-func _arena_row_into(row: Container, compact: bool) -> void:
-	# ◄ VERDANT VALLEY ► pager; compact variant used by the landscape strip.
-	# VBoxes get an inner HBox so the three controls always share one row.
-	var wrap: Container = row
-	if row is VBoxContainer:
-		var hb := HBoxContainer.new()
-		hb.alignment = BoxContainer.ALIGNMENT_CENTER
-		hb.add_theme_constant_override("separation", 6)
-		row.add_child(hb)
-		wrap = hb
+## A labelled selector slab used by the main menu. The accent dot makes the
+## section readable as a distinct control group at a glance; every panel owns
+## its own value/state, so the two selections never bleed into each other.
+func _selector_panel(parent: Container, title: String) -> Dictionary:
+	var panel := PanelContainer.new()
+	var sb := _panel_style(0.40)
+	sb.set_corner_radius_all(14)
+	sb.content_margin_left = 14 * _ui_s
+	sb.content_margin_right = 14 * _ui_s
+	sb.content_margin_top = 10 * _ui_s
+	sb.content_margin_bottom = 10 * _ui_s
+	panel.add_theme_stylebox_override("panel", sb)
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.size_flags_stretch_ratio = 1.0
+	parent.add_child(panel)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", int(5 * _ui_s))
+	panel.add_child(v)
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", int(7 * _ui_s))
+	v.add_child(head)
+	var dot := _mk_label("●", int(12 * _ui_s), "accent", head)
+	dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	var tl := _mk_label(title, int(14 * _ui_s), "dim", head)
+	tl.add_theme_constant_override("outline_size", 0)
+	return {"panel": panel, "vbox": v}
+
+func _build_arena_section(parent: Container) -> void:
+	# ARENA SELECTION: pager over the four real biome presets.
+	var rec := _selector_panel(parent, "ARENA SELECTION")
+	var v: VBoxContainer = rec["vbox"]
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", int(5 * _ui_s))
+	v.add_child(row)
 	var prev_b := _nav_button("◄")
+	prev_b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	prev_b.pressed.connect(func(): AudioMgr.play("click"); arena_shift.emit(-1))
-	wrap.add_child(prev_b)
-	_arena_label = _mk_label("VERDANT VALLEY", int((13 if compact else 15) * _ui_s), "accent", wrap)
-	_arena_label.custom_minimum_size = Vector2((150 if compact else 200) * _ui_s, (44 if not compact else 40) * _ui_s)
+	row.add_child(prev_b)
+	_arena_label = _mk_label("VERDANT VALLEY", int(19 * _ui_s), "accent", row)
 	_arena_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_arena_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_arena_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_arena_label.custom_minimum_size = Vector2(0, 48 * _ui_s)
 	var next_b := _nav_button("►")
+	next_b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	next_b.pressed.connect(func(): AudioMgr.play("click"); arena_shift.emit(1))
-	wrap.add_child(next_b)
+	row.add_child(next_b)
+	_arena_sub = _mk_label("", int(12 * _ui_s), "dim", v)
+	_arena_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_refresh_arena_chrome()
 
+func _build_theme_section(parent: Container) -> void:
+	# THEME SELECTION: its own segmented control + palette preview. The shared
+	# option group ("theme") is refreshed with the Settings pills, so both
+	# entry points always show one truthful active state.
+	var rec := _selector_panel(parent, "THEME SELECTION")
+	var v: VBoxContainer = rec["vbox"]
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", int(6 * _ui_s))
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_child(row)
+	for t in UiTheme.NAMES.size():
+		var tid := t
+		var b := _option_button(row, str(UiTheme.NAMES[tid]), "theme", tid, func(): _set_theme(tid))
+		b.custom_minimum_size = Vector2(0, (60 if _is_touch_device() else 54) * _ui_s)
+		b.add_theme_font_size_override("font_size", int(18 * _ui_s))
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_theme_sub = _mk_label("", int(12 * _ui_s), "dim", v)
+	_theme_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_refresh_theme_chrome()
+
+func _refresh_arena_chrome() -> void:
+	if _arena_label == null or not is_instance_valid(_arena_label):
+		return
+	var key := str(SaveMgr.get_value("arena", "valley"))
+	var preset := ArenaPresets.get_preset(key)
+	_arena_label.text = str(preset.get("name", "VERDANT VALLEY"))
+	if _arena_sub != null and is_instance_valid(_arena_sub):
+		var idx: int = ArenaPresets.ORDER.find(key)
+		_arena_sub.text = "BIOME %d OF %d  ·  ARENA AFFECTS THE MATCH" % [
+			(idx + 1) if idx >= 0 else 1, ArenaPresets.ORDER.size()]
+
+func _refresh_theme_chrome() -> void:
+	var id := int(SaveMgr.get_value("theme", UiTheme.CLASSIC))
+	if _theme_sub != null and is_instance_valid(_theme_sub):
+		_theme_sub.text = "%s PALETTE  ·  AFFECTS UI + MATCH" % UiTheme.NAMES[clampi(id, 0, UiTheme.NAMES.size() - 1)]
 func _refresh_records() -> void:
 	# identity line under the tagline: personal bests from the save file
 	if _rec_best_lab == null or not is_instance_valid(_rec_best_lab):
@@ -995,9 +1056,15 @@ class _PreviewSnake extends Snake:
 		desired_dir = Vector3(sin(heading + 0.55), 0.0, cos(heading + 0.55)).normalized()
 
 func set_arena(key: String) -> void:
-	if _arena_label == null:
+	# keep the labelled ARENA SELECTION panel truthful without touching theme
+	if _arena_label == null or not is_instance_valid(_arena_label):
 		return
-	_arena_label.text = str(ArenaPresets.get_preset(key).get("name", "VALLEY"))
+	var preset := ArenaPresets.get_preset(key)
+	_arena_label.text = str(preset.get("name", "VALLEY"))
+	if _arena_sub != null and is_instance_valid(_arena_sub):
+		var idx: int = ArenaPresets.ORDER.find(key)
+		_arena_sub.text = "BIOME %d OF %d  ·  ARENA AFFECTS THE MATCH" % [
+			(idx + 1) if idx >= 0 else 1, ArenaPresets.ORDER.size()]
 
 func show_menu(v: bool) -> void:
 	menu_group.visible = v
@@ -1027,9 +1094,9 @@ func _build_pause() -> void:
 	overlay_group.add_child(_pause_panel)
 	var p := VBoxContainer.new()
 	p.add_theme_constant_override("separation", 10)
-	p.custom_minimum_size = Vector2(380 * _ui_scale(), 0)   # wide tappable rows
+	p.custom_minimum_size = Vector2(460 * _ui_scale(), 0)   # wide tappable rows
 	_pause_panel.add_child(p)
-	_mk_label("PAUSED", 44, "text", p)
+	_mk_label("PAUSED", int(40 * _ui_scale()), "text", p)
 	_menu_button(p, "RESUME", func(): resume_pressed.emit())
 	_menu_button(p, "RESTART MATCH", func(): restart_pressed.emit())
 	_menu_button(p, "SETTINGS", func(): _open_settings_from_pause())
@@ -1082,10 +1149,10 @@ func _build_gameover() -> void:
 	overlay_group.add_child(_over_panel)
 	var p := VBoxContainer.new()
 	p.add_theme_constant_override("separation", 10)
-	p.custom_minimum_size = Vector2(380 * _ui_scale(), 0)   # wide tappable rows
+	p.custom_minimum_size = Vector2(460 * _ui_scale(), 0)   # wide tappable rows
 	_over_panel.add_child(p)
-	_over_title = _mk_label("ELIMINATED", 52, "warn", p)
-	_over_lines = _mk_label("", 18, "text", p)
+	_over_title = _mk_label("ELIMINATED", int(44 * _ui_scale()), "warn", p)
+	_over_lines = _mk_label("", int(17 * _ui_scale()), "text", p)
 	_menu_button(p, "RESTART", func(): restart_pressed.emit())
 	_menu_button(p, "MAIN MENU", func(): tomenu_pressed.emit())
 
@@ -1237,9 +1304,9 @@ func _mk_label(text: String, size: int, role_or_color: Variant, parent: Node = n
 func _nav_button(text: String) -> Button:
 	var b := Button.new()
 	b.text = text
-	b.custom_minimum_size = Vector2(50 * _ui_s, 46 * _ui_s)
+	b.custom_minimum_size = Vector2(56 * _ui_s, 56 * _ui_s)
 	_style_button(b)
-	b.add_theme_font_size_override("font_size", int(22 * _ui_s))
+	b.add_theme_font_size_override("font_size", int(24 * _ui_s))
 	b.add_theme_color_override("font_color", UiTheme.c("text"))
 	b.add_theme_color_override("font_hover_color", UiTheme.c("accent"))
 	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -1250,11 +1317,12 @@ func _menu_button(parent: Node, text: String, on_press: Callable, primary: bool 
 	b.text = text
 	# never take keyboard focus: focused buttons swallow arrow keys during play
 	b.focus_mode = Control.FOCUS_NONE
-	# mobile-first touch targets: ~60 px rows / ~76 px primary, stretched to
-	# the FULL menu column width — buttons fill the page, no narrow card look
+	# Big, confident game-menu targets. Hero PLAY is ~104 px on a phone and
+	# ~88 px on desktop; secondaries stay comfortably above the 48 px touch
+	# minimum on every display. Buttons stretch across their column.
 	var mob := _is_touch_device()
-	var row_h := (76 if primary else 60) if mob else (68 if primary else 54)
-	var fs := 27 if primary else 20
+	var row_h := (104 if primary else 82) if mob else (88 if primary else 70)
+	var fs := (34 if mob else 30) if primary else (26 if mob else 23)
 	b.custom_minimum_size = Vector2(0, row_h * _ui_s)
 	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_style_button(b, primary)
@@ -1270,6 +1338,7 @@ func _menu_button(parent: Node, text: String, on_press: Callable, primary: bool 
 		_tb.append(b)
 		b.set_meta("primary", primary)
 	b.pivot_offset = b.custom_minimum_size * 0.5
+	b.resized.connect(func(): b.pivot_offset = b.size * 0.5)
 	# micro hover / press motion (spec §5/§9)
 	b.mouse_entered.connect(func():
 		var tw := b.create_tween()
@@ -1289,8 +1358,8 @@ func _option_button(parent: Node, text: String, group: String, value: int, on_pr
 	# settings/title selector button; tapping ALWAYS selects THIS value (never
 	# a toggle) and the active one is marked with a pulsing check (spec §1)
 	var b := _menu_button(parent, text, on_press)
-	b.custom_minimum_size = Vector2((180 if _is_touch_device() else 164) * _ui_s, (48 if _is_touch_device() else 44) * _ui_s)
-	b.add_theme_font_size_override("font_size", int(16 * _ui_s))
+	b.custom_minimum_size = Vector2((190 if _is_touch_device() else 172) * _ui_s, (58 if _is_touch_device() else 50) * _ui_s)
+	b.add_theme_font_size_override("font_size", int(17 * _ui_s))
 	b.set_meta("opt_group", group)
 	b.set_meta("opt_value", value)
 	b.set_meta("opt_text", text)
@@ -1328,7 +1397,7 @@ func _refresh_options() -> void:
 		b.add_theme_color_override("font_color", UiTheme.c("panel_bg") if sel else UiTheme.c("text"))
 		b.add_theme_color_override("font_hover_color", UiTheme.c("panel_bg") if sel else UiTheme.c("accent"))
 		b.add_theme_color_override("font_pressed_color", UiTheme.c("panel_bg") if sel else UiTheme.c("accent"))
-		b.text = str(b.get_meta("opt_text")) + ("   ACTIVE" if sel else "")
+		b.text = str(b.get_meta("opt_text")) + ("  ●" if sel else "")
 		b.scale = Vector2.ONE
 		if sel and _opt_selected == null:
 			_opt_selected = b
@@ -1430,6 +1499,8 @@ func apply_theme(id: int) -> void:
 			cr.color = UiTheme.with_alpha(str(rec[1]), float(rec[2]))
 	_rebuild_menu_scrim()
 	_refresh_options()
+	_refresh_arena_chrome()
+	_refresh_theme_chrome()
 	_refresh_skin_buttons()
 	if _preview_snake != null and is_instance_valid(_preview_snake):
 		_preview_snake.set_rim(0.55 if UiTheme.is_dark() else 0.12)

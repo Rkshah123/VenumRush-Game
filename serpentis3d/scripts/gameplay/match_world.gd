@@ -81,6 +81,9 @@ func restyle(dark_v: bool, mode_2d: bool) -> void:
 	_build_arena()
 	food.obstacles = obstacles
 	food.set_style(dark, mode_2d)
+	# The new arena may have different obstacles: never leave a fruit buried
+	# in one after a live 2D/3D or theme switch.
+	food.revalidate_spawns()
 	for s in snakes:
 		if is_instance_valid(s) and s.alive:
 			s.set_rim(_rim_for())
@@ -444,15 +447,25 @@ func _eat_checks() -> void:
 	for s in snakes:
 		if not is_instance_valid(s) or not s.alive:
 			continue
-		var reach: float = s.head_radius() + 0.55
+		# Contact is measured at the JAWS and swept over the whole eat-tick
+		# window: a fast (or boosting, or magnetised) head cannot tunnel past a
+		# fruit, and a fruit no longer vanishes a body-length before the bite.
+		var reach: float = s.mouth_reach()
 		if s.ability_active("magnet"):
 			reach *= 4.5
-		var hits: Array = food.eat_hits(s.head_pos, reach)
+		var mouth: Vector3 = s.mouth_pos
+		var hits: Array = food.eat_hits_sweep(s.mouth_prev, mouth, reach)
+		s.mouth_prev = mouth
 		for h in hits:
 			var k := int(h["kind"])
+			var rec: Dictionary = h["rec"]
+			# Claim the fruit first. fly_rec() rejects a record another snake
+			# already claimed in this tick, so score/growth/effects can never be
+			# applied twice for one fruit.
+			if not food.fly_rec(rec, s):
+				continue
 			if k == 3:
 				# POWER ORB: activates a random ability on the eater
-				food.fly_orb_at_pos(k, h["pos"], s)
 				var ab := "magnet" if randf() < 0.5 else "shield"
 				s.apply_ability(ab)
 				if verbose:
@@ -471,8 +484,7 @@ func _eat_checks() -> void:
 				if hud != null and is_instance_valid(hud):
 					hud.push_score_popup_at("+%d" % sv, GameHud.role_color("gold") if k == 2 else GameHud.role_color("accent"), h["pos"])
 			s.eat(k, FoodSpawner.KIND_GROWTH[k], FoodSpawner.KIND_SCORE[k])
-			# fruit flies into the mouth; bite + burst are part of the event
-			food.fly_orb_at_pos(k, h["pos"], s)
+			# fruit is drawn into the mouth; the gulp fires when it lands
 			s.eat_bite()
 
 # ------------------------------------------------------------------ HUD feed

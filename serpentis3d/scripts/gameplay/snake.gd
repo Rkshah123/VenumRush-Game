@@ -10,12 +10,22 @@ signal ate(snake: Snake, kind: int, score_value: int)
 const SPACING := 0.075          # polyline sampling spacing (m)
 const RING_COUNT := 384         # body stations (tube rings); texel = 1/384
 const RING_TEXEL := 1.0 / float(RING_COUNT)
-const HIST_MAX := 1024
+# Path history must cover the longest supported body with margin. 1440 samples
+# × 0.075 m = 108 m: the boss can reach 92 m and still renders its tail.
+const HIST_MAX := 1440
 const MIN_LENGTH := 3.5
 const GROWTH_RATE := 3.4        # visual growth speed (m/s toward target length)
 const TURN_RATE_BASE := 3.6
 const MIN_TURN_RADIUS := 1.05   # curvature guard: no tube self-intersection
+const TURN_ACCEL := 55.0        # rad/s² of angular inertia: smooth S-curves, no snap
 const BASE_SPEED := 4.6
+# Fruit-driven speed progression. The speed rises smoothly from BASE_SPEED at
+# spawn to SPEED_MAX by SPEED_RAMP_END metres, then NEVER rises again: eating
+# past the cap only adds length + score (spec: balanced progression). Boost is
+# the intentional temporary sprint mechanic and is applied on top afterwards.
+const SPEED_MAX := 6.2
+const SPEED_RAMP_START := 8.0
+const SPEED_RAMP_END := 46.0
 const BOOST_MULT := 1.6
 const BOOST_MAX := 3.2
 const BOOST_REGEN := 0.55
@@ -31,7 +41,7 @@ var skin_seed := 0.5
 var pattern := 0                  # 0 plain, 1 bands, 2 blotches, 3 zigzag, 4 stripes
 var rim := 0.0                   # fresnel edge light (dark theme / 2D mode visibility pass)
 var initial_length := 7.0
-var max_length := 58.0
+var max_length := 76.0
 
 var alive := true
 var score := 0
@@ -46,10 +56,18 @@ var head_pos := Vector3.ZERO
 var wave_phase := 0.0
 var wave_phase_off := 0.0
 var speed_cur := 0.0
+var _turn_vel := 0.0              # smoothed angular velocity (rad/s)
 var _head_rot := Basis.IDENTITY    # smoothed pure-rotation basis of the head
+
+# Mouth (world space). `mouth_pos` is refreshed with the head rig, `mouth_prev`
+# is the previous eat-check sample: fruit collision sweeps the segment between
+# them, so contact is judged at the jaws and a fast head can never skip a fruit.
+var mouth_pos := Vector3.ZERO
+var mouth_prev := Vector3.ZERO
 
 var boost_active := false
 var boost_meter := BOOST_MAX
+var gulp_count := 0    # QA: visible swallow() count (one per landed fruit)
 
 # --- power-orb abilities (Magnet Pulse / Shield) ---
 const ABILITY_DUR := {"magnet": 5.0, "shield": 4.0}
@@ -90,6 +108,7 @@ var _mouth_open := 0.0
 var _flick_timer := 0.0
 var _flick_phase := 0.0
 var _lunge := 0.0                 # eating animation: quick head snap (0..1)
+var _bite_hold := 0.0             # jaw stays open while the fruit flies in
 var _pulse := 0.0                 # growth response: brief body thickening (0..1)
 var _lean := 0.0                  # roll into turns (body bank)
 var _eye_mats: Array[StandardMaterial3D] = []   # eyes — theme rim pass
@@ -146,20 +165,29 @@ func spawn(pos: Vector3, dir: Vector3, body_len: float) -> void:
 	head_pos = pos
 	wave_phase = randf() * TAU
 	wave_phase_off = randf() * TAU
-	speed_cur = BASE_SPEED
+	speed_cur = base_speed()
+	_turn_vel = 0.0
 	boost_meter = BOOST_MAX
 	spawn_ms = Time.get_ticks_msec()
 	spawn_match_time = match_world.match_time if match_world != null else 0.0
+	desired_dir = Vector3(dir.x, 0.0, dir.z).normalized()
+	if desired_dir.length_squared() < 0.1:
+		desired_dir = Vector3(sin(heading), 0.0, cos(heading))
 
-	# Fill polyline with a straight tail extending backwards so the body exists immediately.
+	# Fill the polyline with a straight tail extending BACKWARDS from the head.
+	# The buffer's newest sample must be the head (index n-1): _hist_at(0)
+	# walks back from there. The old head-at-index-0 fill made the whole tube
+	# grow AHEAD of the snake and scrambled the tail until the ring wrapped.
 	var back := -Vector3(dir.x, 0.0, dir.z).normalized()
 	var n := mini(HIST_MAX, int(length / SPACING) + 4)
 	for i in n:
-		_hist[i] = pos + back * (float(i) * SPACING)
+		_hist[n - 1 - i] = pos + back * (float(i) * SPACING)
 	_hist_write = n
 	_hist_count = n
-	_last_sample = pos
 	_hist_write %= HIST_MAX
+	_last_sample = pos
+	mouth_pos = pos + Vector3(dir.x, 0.0, dir.z).normalized() * 0.55
+	mouth_prev = mouth_pos
 
 func _physics_process(delta: float) -> void:
 	if not alive:
@@ -188,16 +216,21 @@ func _physics_process(delta: float) -> void:
 
 	# --- steering: limited angular rate keeps the tube self-consistent ---
 	var target_h := atan2(desired_dir.x, desired_dir.z)
-	var speed_target := BASE_SPEED * (1.0 + clampf((length - 8.0) / 50.0, 0.0, 0.12))
+	var speed_target := base_speed()
 	if boost_active:
 		speed_target *= BOOST_MULT
 	var max_rate := speed_target / MIN_TURN_RADIUS
-	var rate := clampf(TURN_RATE_BASE * (0.8 if boost_active else 1.0), 0.5, max_rate)
+	var rate := clampf(TURN_RATE_BASE * (0.82 if boost_active else 1.0), 0.5, max_rate)
 	var dh := wrapf(target_h - heading, -PI, PI)
-	var turn_step := clampf(dh, -rate * delta, rate * delta)
+	# Angular inertia instead of an instant heading snap: small corrections are
+	# proportional, hard turns saturate, and reversals roll through the body
+	# as a real serpent's S-curve rather than a robotic pivot.
+	var want_rate := clampf(dh * 8.0, -rate, rate)
+	_turn_vel = move_toward(_turn_vel, want_rate, TURN_ACCEL * delta)
+	var turn_step := _turn_vel * delta
 	heading += turn_step
 	# body roll into turns: snakes bank into corners (spec §3)
-	_lean = lerpf(_lean, clampf(-turn_step / maxf(delta, 0.001) * 0.06, -0.5, 0.5), 1.0 - exp(-8.0 * delta))
+	_lean = lerpf(_lean, clampf(-_turn_vel * 0.10, -0.5, 0.5), 1.0 - exp(-8.0 * delta))
 
 	# --- accelerate & move ---
 	speed_cur = move_toward(speed_cur, speed_target, (14.0 if boost_active else 7.0) * delta)
@@ -249,9 +282,16 @@ func ability_frac() -> float:
 func _update_spine(delta: float) -> void:
 	# decay the growth-response pulse (drives the body-radius bump in _radius_at)
 	_pulse = maxf(0.0, _pulse - delta * 2.1)
+	# A body can never be sampled past the path it has actually travelled.
+	# Normally movement outruns growth; the fallback keeps the tube intact if a
+	# long snake is created/resized (boss spawn, dev harness, future modes).
+	_ensure_history_path(length + SPACING * 2.0)
 	var ds := length / float(RING_COUNT - 1)
 	var head := _hist_at(0)
 	# Walk the recorded polyline from the head backwards, spacing stations by ds.
+	# The walk is bounded by the VALID sample count, never by the array size —
+	# reading unwritten ring slots produced zero-length spikes and ate the tail.
+	var seg_limit := maxi(0, _hist_count - 2)
 	var idx_seg := 0
 	var seg_a := head
 	var seg_b := _hist_at(1)
@@ -260,7 +300,7 @@ func _update_spine(delta: float) -> void:
 	for i in range(1, RING_COUNT):
 		var need := ds * float(i)
 		var guard := 0
-		while seg_used + SPACING < need and idx_seg + 2 < HIST_MAX and guard < 4096:
+		while seg_used + SPACING < need and idx_seg < seg_limit and guard < 4096:
 			seg_used += SPACING
 			idx_seg += 1
 			seg_a = seg_b
@@ -339,6 +379,33 @@ func _update_spine(delta: float) -> void:
 func _hist_at(steps_back: int) -> Vector3:
 	return _hist[(_hist_write - 1 - steps_back + 2 * HIST_MAX) % HIST_MAX]
 
+## Extend the straight tail sample chain when a body is longer than the path
+## already recorded (long spawns, boss growth, dev length changes). Samples are
+## appended behind the OLDEST point along its incoming direction, so the
+## rendered tail keeps the correct length and spacing instead of reading zeros.
+func _ensure_history_path(need_path: float) -> void:
+	if _hist_count < 2:
+		return
+	var have := float(_hist_count - 1) * SPACING
+	if have >= need_path:
+		return
+	var oldest := _hist_at(_hist_count - 1)
+	var older := _hist_at(_hist_count - 2)
+	var back := oldest - older
+	back.y = 0.0
+	if back.length_squared() < 1e-8:
+		back = Vector3(-sin(heading), 0.0, -cos(heading))
+	back = back.normalized()
+	var edge := oldest
+	var guard := 0
+	while have + 0.0001 < need_path and _hist_count < HIST_MAX and guard < (HIST_MAX * 2):
+		edge += back * SPACING
+		_hist[_hist_write % HIST_MAX] = edge
+		_hist_write += 1
+		_hist_count += 1
+		have += SPACING
+		guard += 1
+
 ## Optional per-instance girth multiplier (menu serpents slim down; gameplay
 ## keeps the chunky top-down proportions). 1.0 = untouched game behavior.
 var girth := 1.0
@@ -355,14 +422,24 @@ func _body_radius() -> float:
 		r *= 1.9
 	return r
 
+## Fruit-driven cruise speed. Smooth, capped, frame-rate independent: the ramp
+## is a function of LENGTH (which itself grows smoothly), never of frames.
+func base_speed() -> float:
+	var t := smoothstep(SPEED_RAMP_START, SPEED_RAMP_END, length)
+	return lerpf(BASE_SPEED, SPEED_MAX, t)
+
 func _radius_at(i: int, body_r: float) -> float:
 	var t := float(i) / float(RING_COUNT - 1)
-	var neck := 0.72 + 0.28 * smoothstep(0.0, 0.06, t)   # slim behind head
+	# slim only right behind the skull (a FIXED fraction, not 6% of a 76 m body)
+	var neck := 0.86 + 0.14 * smoothstep(0.0, 0.022, t)
 	var r := body_r * neck
 	# eating response: a brief thickening that starts at the head and rides back
 	r *= 1.0 + 0.085 * _pulse * smoothstep(0.0, 0.35, t) * (1.0 - smoothstep(0.55, 0.95, t))
-	r *= 1.0 - 0.94 * smoothstep(0.80, 1.0, t)           # tail taper
-	return maxf(r, 0.004)
+	# Tail taper: the last 12% of the body narrows, but the tip keeps a real,
+	# visible girth. The old 20%-long taper down to 6% made a very long snake's
+	# tail fade to ~1 px from the top-down camera and read as "missing".
+	r *= 1.0 - 0.88 * smoothstep(0.88, 1.0, t)
+	return maxf(r, body_r * 0.10)
 
 func _length_animate(delta: float) -> void:
 	length = move_toward(length, target_length, GROWTH_RATE * delta)
@@ -372,17 +449,28 @@ func _length_animate(delta: float) -> void:
 func eat(kind: int, growth: float, score_value: int) -> void:
 	score += score_value
 	target_length = minf(max_length, target_length + growth)
-	_mouth_open = 1.0
-	_pulse = 1.0
 	# Chaining orbs rewards a small boost refill — organic pacing incentive.
 	boost_meter = minf(BOOST_MAX, boost_meter + 0.6)
 	ate.emit(self, kind, score_value)
 
 func eat_bite() -> void:
-	# Eating animation (spec §4): quick head lunge + jaw snap. Called together
-	# with the real eat event so the fruit vanishes into the bite.
+	# Bite animation, played at the exact contact frame: head lunges, jaws open
+	# and stay open while the fruit is drawn in, then snap shut in _update_head.
 	_lunge = 1.0
-	_mouth_open = maxf(_mouth_open, 1.0)
+	_bite_hold = 0.11
+	_mouth_open = 1.0
+
+func swallow() -> void:
+	# Called when the fruit actually lands in the mouth (not at first contact):
+	# the visible gulp travels down the neck and the jaw settles.
+	_pulse = 1.0
+	_lunge = maxf(_lunge, 0.30)
+	gulp_count += 1
+
+## Radius around the MOUTH at which a fruit counts as bitten. Scaled with the
+## head so big serpents don't swallow fruit with the back of their skull.
+func mouth_reach() -> float:
+	return 0.24 + head_radius() * 0.35
 
 func die(killer_name: String = "") -> void:
 	if not alive:
@@ -459,8 +547,8 @@ func _build_body() -> void:
 	arrays[Mesh.ARRAY_INDEX] = idx
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	# A long snake can curl anywhere around its head, so the cull volume must
-	# cover the maximum body envelope (coarse but correct).
-	mesh.custom_aabb = AABB(Vector3(-70.0, -4.0, -70.0), Vector3(140.0, 8.0, 140.0))
+	# cover the maximum body envelope (1440 samples = 108 m of maximum body).
+	mesh.custom_aabb = AABB(Vector3(-112.0, -5.0, -112.0), Vector3(224.0, 10.0, 224.0))
 
 	if _shader == null:
 		_shader = load("res://shaders/snake_body.gdshader")
@@ -727,7 +815,9 @@ func _update_head(delta: float) -> void:
 	fwd = fwd.normalized() if fwd.length_squared() > 1e-8 else Vector3(sin(heading), 0, cos(heading))
 	var target_basis := Basis.looking_at(fwd, Vector3.UP)
 	# subtle living head bob & breathing tilt (aligned with the traveling wave)
-	var bob_yaw := sin(wave_phase * 0.5 + wave_phase_off) * 0.07
+	var bob_yaw := sin(wave_phase * 0.5 + wave_phase_off) * 0.05
+	# head leads slightly into the turn: snakes look where they are going
+	bob_yaw += clampf(_turn_vel * 0.045, -0.16, 0.16)
 	var breathe := sin(Time.get_ticks_msec() * 0.0035 + wave_phase_off) * 0.022
 	target_basis = target_basis.rotated(Vector3.UP, bob_yaw)
 	target_basis = target_basis.rotated(target_basis.x, breathe)
@@ -742,12 +832,20 @@ func _update_head(delta: float) -> void:
 	var lunge_q := 1.0 - _lunge
 	var lunge_amt := sin(minf(lunge_q, 1.0) * PI) if _lunge > 0.0 else 0.0
 	head_root.transform = Transform3D(b, p0 + fwd * (body_r * 0.22) + fwd * lunge_amt * body_r * 0.9)
+	# Mouth anchor = the front of the jaw in world space. Eat collision is
+	# measured HERE, not at the head origin (which sits under the skull).
+	mouth_pos = head_root.global_transform * Vector3(0.0, -0.06, -0.82)
 
-	# mouth open/close (lunge adds a quick extra snap)
-	if _mouth_open > 0.0:
-		_mouth_open = maxf(0.0, _mouth_open - delta * 2.4)
+	# Jaw: hold open while the fruit flies in, then snap shut quickly. The old
+	# decay started closing the instant the fruit was touched and kept it open
+	# afterwards, which read as chewing thin air.
+	if _bite_hold > 0.0:
+		_bite_hold = maxf(0.0, _bite_hold - delta)
+		_mouth_open = maxf(_mouth_open, 0.92)
+	elif _mouth_open > 0.0:
+		_mouth_open = maxf(0.0, _mouth_open - delta * 7.0)
 	if _jaw:
-		_jaw.rotation.x = _mouth_open * 0.62 + lunge_amt * 0.35
+		_jaw.rotation.x = _mouth_open * 0.58 + lunge_amt * 0.22
 
 	# tongue flick cycle
 	_flick_timer -= delta
