@@ -10,9 +10,11 @@ signal ate(snake: Snake, kind: int, score_value: int)
 const SPACING := 0.075          # polyline sampling spacing (m)
 const RING_COUNT := 384         # body stations (tube rings); texel = 1/384
 const RING_TEXEL := 1.0 / float(RING_COUNT)
-# Path history must cover the longest supported body with margin. 1440 samples
-# × 0.075 m = 108 m: the boss can reach 92 m and still renders its tail.
-const HIST_MAX := 1440
+# Path history must cover the longest supported body with margin. 2048 samples
+# × 0.075 m = 153.6 m: the boss can reach 90 m and still renders its tail even
+# when the head is boosting. Samples are recorded at an exact arc-length step,
+# so the count is frame-rate independent (see _record_path).
+const HIST_MAX := 2048
 const MIN_LENGTH := 3.5
 const GROWTH_RATE := 3.4        # visual growth speed (m/s toward target length)
 const TURN_RATE_BASE := 3.6
@@ -64,6 +66,7 @@ var _head_rot := Basis.IDENTITY    # smoothed pure-rotation basis of the head
 # them, so contact is judged at the jaws and a fast head can never skip a fruit.
 var mouth_pos := Vector3.ZERO
 var mouth_prev := Vector3.ZERO
+var head_prev := Vector3.ZERO   # previous head-centre sample (fruit capsule sweep)
 
 var boost_active := false
 var boost_meter := BOOST_MAX
@@ -87,6 +90,13 @@ var hold_heading := -999.0   # dev: lock steering straight (closeup diagnosis)
 var match_world = null
 
 # Body rendering
+# Grounding: gameplay snakes ride ON the arena surface (body centre lifted by
+# its flattened radius) with no vertical bob. Menu serpents keep their floating
+# cinematic stage pose. Both are body-local, so the simulation stays at y=0.
+var grounded := false
+var body_lift := 0.0
+var vertical_wave := true
+
 var body_mi: MeshInstance3D
 var _mat: ShaderMaterial
 var _tex: ImageTexture
@@ -182,12 +192,15 @@ func spawn(pos: Vector3, dir: Vector3, body_len: float) -> void:
 	var n := mini(HIST_MAX, int(length / SPACING) + 4)
 	for i in n:
 		_hist[n - 1 - i] = pos + back * (float(i) * SPACING)
-	_hist_write = n
+	_hist_write = n % HIST_MAX
 	_hist_count = n
-	_hist_write %= HIST_MAX
 	_last_sample = pos
+	head_prev = pos
 	mouth_pos = pos + Vector3(dir.x, 0.0, dir.z).normalized() * 0.55
 	mouth_prev = mouth_pos
+	if grounded:
+		body_lift = _body_radius() * 0.86 + 0.02
+		vertical_wave = false
 
 func _physics_process(delta: float) -> void:
 	if not alive:
@@ -238,12 +251,8 @@ func _physics_process(delta: float) -> void:
 	head_vel = fwd * speed_cur
 	head_pos += head_vel * delta
 
-	# --- record path ---
-	if head_pos.distance_to(_last_sample) >= SPACING:
-		_hist[_hist_write % HIST_MAX] = head_pos
-		_hist_write += 1
-		_hist_count = mini(_hist_count + 1, HIST_MAX)
-		_last_sample = head_pos
+	# --- record path at an exact arc-length step ---
+	_record_path(head_pos)
 
 	wave_phase += speed_cur * delta * 0.95
 
@@ -287,55 +296,85 @@ func _update_spine(delta: float) -> void:
 	# long snake is created/resized (boss spawn, dev harness, future modes).
 	_ensure_history_path(length + SPACING * 2.0)
 	var ds := length / float(RING_COUNT - 1)
-	var head := _hist_at(0)
-	# Walk the recorded polyline from the head backwards, spacing stations by ds.
-	# The walk is bounded by the VALID sample count, never by the array size —
-	# reading unwritten ring slots produced zero-length spikes and ate the tail.
-	var seg_limit := maxi(0, _hist_count - 2)
-	var idx_seg := 0
-	var seg_a := head
-	var seg_b := _hist_at(1)
-	var seg_used := 0.0
+	var head := head_pos
+	if grounded:
+		body_lift = _body_radius() * 0.86 + 0.02
+	var lift := body_lift
+
+	# Walk the path ONCE from the current head backwards, accumulating REAL
+	# segment lengths. The old walk assumed every history sample was exactly
+	# SPACING apart; at 30/60 FPS the head moves farther than that per frame,
+	# so the stations were placed progressively too far back and the body
+	# compressed/jumped as the sample crossed a frame boundary. Arc-length
+	# accumulation makes the tube identical at any frame rate.
 	_raw[0] = head
-	for i in range(1, RING_COUNT):
-		var need := ds * float(i)
-		var guard := 0
-		while seg_used + SPACING < need and idx_seg < seg_limit and guard < 4096:
-			seg_used += SPACING
-			idx_seg += 1
-			seg_a = seg_b
-			seg_b = _hist_at(idx_seg + 1)
-			guard += 1
-		var f := clampf((need - seg_used) / SPACING, 0.0, 1.0)
-		_raw[i] = seg_a.lerp(seg_b, f)
+	var need_i := 1
+	var need := ds
+	var prev := head
+	var walked := 0.0
+	var k := 0
+	var last_back := Vector3(-sin(heading), 0.0, -cos(heading))
+	while need_i < RING_COUNT and k < _hist_count:
+		var next := _hist_at(k)
+		var seg := next - prev
+		seg.y = 0.0
+		var seg_len := seg.length()
+		if seg_len > 0.000001:
+			last_back = seg / seg_len
+			while need_i < RING_COUNT and need <= walked + seg_len + 0.000001:
+				var f := clampf((need - walked) / seg_len, 0.0, 1.0)
+				_raw[need_i] = prev.lerp(next, f)
+				need_i += 1
+				need += ds
+			walked += seg_len
+		prev = next
+		k += 1
+	# Only reachable if the ring was shorter than the requested body (very
+	# long boss / dev resize): extend straight behind the oldest sample.
+	if need_i < RING_COUNT:
+		var remain := need - walked
+		for i in range(need_i, RING_COUNT):
+			_raw[i] = prev + last_back * remain
+			remain += ds
 
 	var body_r := _body_radius()
 	var motion := clampf(speed_cur / BASE_SPEED, 0.10, 1.35)
 	var k_wave := TAU / 5.2  # ~5.2 m serpentine wavelength
+	# Tangent smoothing window: at least ~1.5 history samples wide. Short
+	# snakes have tiny station spacing, so a 1-station tangent would flip at
+	# every 7.5 cm history segment on a hard turn, making the tube bunch.
+	var tangent_w := clampi(int(ceil(SPACING * 1.5 / maxf(ds, 0.0001))), 1, 16)
 
 	for i in RING_COUNT:
-		var i_a := maxi(i - 1, 0)
-		var i_b := mini(i + 1, RING_COUNT - 1)
+		var i_a := maxi(i - tangent_w, 0)
+		var i_b := mini(i + tangent_w, RING_COUNT - 1)
 		var d3 := _raw[i_b] - _raw[i_a]
 		d3.y = 0.0
 		var dir_i := d3.normalized() if d3.length_squared() > 1e-8 else Vector3(0, 0, 1)
 		var perp := Vector3(-dir_i.z, 0.0, dir_i.x)  # lateral
 		_perp[i] = perp
 		var t := float(i) / float(RING_COUNT - 1)
-		# Traveling wave, head to tail. Amplitude grows toward the tail (real snakes).
-		var amp := clampf(0.42 * pow(t, 1.18), 0.0, 0.5)
+		# Traveling wave, head to tail. Amplitude grows toward the tail (real
+		# snakes) and scales with body length: a 6 m snake must not carry the
+		# same 5.2 m-wavelength, 0.4 m amplitude as a 70 m one, or its closely
+		# spaced spine stations visibly bunch/stretch.
+		var amp := clampf(0.42 * pow(t, 1.18) * clampf(length / 20.0, 0.25, 1.0), 0.0, 0.5)
 		var ph := wave_phase + wave_phase_off
 		var sway := sin(float(i) * ds * k_wave - ph)
-		# micro vertical ripple for organic feel
-		var vsway := 0.05 * amp * sin(float(i) * ds * k_wave * 2.0 - ph * 0.6)
+		# Menu-only micro vertical ripple. Gameplay snakes stay flat on the
+		# arena surface (no bobbing / sinking into the ground in 2D or 3D).
+		var vsway := 0.0
+		if vertical_wave:
+			vsway = 0.05 * amp * sin(float(i) * ds * k_wave * 2.0 - ph * 0.6)
 		var p := _raw[i] + perp * (amp * sway * motion) + Vector3.UP * vsway
 
 		var r := _radius_at(i, body_r)
 		var o := i * 4
 		# Store head-relative (root-local) coordinates: the tube mesh hangs in
-		# root-local space with the root anchored at the head.
+		# root-local space with the root anchored at the head. `lift` raises the
+		# whole tube/head onto the arena surface without moving the simulation.
 		_spine[o] = p.x - head.x
-		_spine[o + 1] = p.y - head.y
+		_spine[o + 1] = p.y - head.y + lift
 		_spine[o + 2] = p.z - head.z
 		_spine[o + 3] = r
 
@@ -376,6 +415,30 @@ func _update_spine(delta: float) -> void:
 			_spine[o + 2] + head.z))
 		coll_r.append(_spine[o + 3] * 0.86)
 
+## Record history samples at an exact SPACING arc step, interpolating along
+## the frame's movement. This removes the old "one sample per frame" coupling:
+## a 30 FPS phone, a 60 FPS desktop and a 144 FPS monitor all get the same
+## polyline and therefore the same body length/curve.
+func _record_path(now: Vector3) -> void:
+	var step := now - _last_sample
+	step.y = 0.0
+	var dist := step.length()
+	if dist < 0.000001:
+		return
+	var dir := step / dist
+	var guard := 0
+	while dist >= SPACING and guard < 64:
+		_last_sample += dir * SPACING
+		_push_history(_last_sample)
+		dist -= SPACING
+		guard += 1
+
+func _push_history(p: Vector3) -> void:
+	_hist[_hist_write] = p
+	_hist_write = (_hist_write + 1) % HIST_MAX
+	if _hist_count < HIST_MAX:
+		_hist_count += 1
+
 func _hist_at(steps_back: int) -> Vector3:
 	return _hist[(_hist_write - 1 - steps_back + 2 * HIST_MAX) % HIST_MAX]
 
@@ -397,11 +460,15 @@ func _ensure_history_path(need_path: float) -> void:
 		back = Vector3(-sin(heading), 0.0, -cos(heading))
 	back = back.normalized()
 	var edge := oldest
+	# Append BEHIND the oldest sample, not at _hist_write (which is the next
+	# NEWEST slot). The old code inserted the new tail point as the newest
+	# point, reversing the path and making long snakes detach/jump.
+	var oldest_idx := (_hist_write - _hist_count + HIST_MAX) % HIST_MAX
 	var guard := 0
-	while have + 0.0001 < need_path and _hist_count < HIST_MAX and guard < (HIST_MAX * 2):
+	while have + 0.0001 < need_path and _hist_count < HIST_MAX and guard < HIST_MAX:
+		oldest_idx = (oldest_idx - 1 + HIST_MAX) % HIST_MAX
 		edge += back * SPACING
-		_hist[_hist_write % HIST_MAX] = edge
-		_hist_write += 1
+		_hist[oldest_idx] = edge
 		_hist_count += 1
 		have += SPACING
 		guard += 1

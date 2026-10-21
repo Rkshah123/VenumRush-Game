@@ -7,7 +7,7 @@ extends Snake
 enum Mode { WANDER, SEEK, CHASE, FLEE }
 
 # body pattern mode per personality (see snake_body.gdshader u_pattern)
-const PERSONALITY_PATTERN := {"hunter": 3, "scav": 1, "survivor": 2, "speedy": 4, "territor": 1, "elite": 0, "python": 2, "viper": 3, "mamba": 4, "sidewinder": 1}
+const PERSONALITY_PATTERN := {"hunter": 3, "scav": 1, "survivor": 2, "speedy": 4, "territor": 1, "elite": 0, "python": 2, "viper": 3, "mamba": 4, "sidewinder": 1, "cobra": 3, "anaconda": 2, "raptor": 4}
 
 const PERSONALITIES := {
 	"hunter":   {"n": "Hunter",    "aggr": 0.95, "caution": 0.25, "range": 22.0, "boost_use": 0.6, "colors": [Color(0.72, 0.12, 0.1), Color(1.0, 0.45, 0.1)]},
@@ -20,6 +20,10 @@ const PERSONALITIES := {
 	"viper":    {"n": "Viper",    "aggr": 0.7,  "caution": 0.3,  "range": 26.0, "boost_use": 0.75, "colors": [Color(0.5, 0.08, 0.3), Color(0.95, 0.5, 0.9)]},
 	"mamba":    {"n": "Mamba",    "aggr": 0.9,  "caution": 0.35, "range": 30.0, "boost_use": 0.85, "colors": [Color(0.05, 0.3, 0.15), Color(0.4, 1.0, 0.6)]},
 	"sidewinder": {"n": "Sidewinder", "aggr": 0.45, "caution": 0.4, "range": 24.0, "boost_use": 0.5, "colors": [Color(0.55, 0.4, 0.15), Color(0.95, 0.8, 0.5)]},
+	# --- the three extra villains: independent personalities + palettes ---
+	"cobra":    {"n": "Cobra",    "aggr": 0.65, "caution": 0.4,  "range": 27.0, "boost_use": 0.45, "colors": [Color(0.24, 0.15, 0.05), Color(1.0, 0.74, 0.16)], "belly": Color(0.92, 0.80, 0.50), "seed": 0.18},
+	"anaconda": {"n": "Anaconda", "aggr": 0.5,  "caution": 0.6,  "range": 31.0, "boost_use": 0.2,  "colors": [Color(0.08, 0.24, 0.18), Color(0.34, 0.95, 0.64)], "belly": Color(0.72, 0.82, 0.56), "seed": 0.63},
+	"raptor":   {"n": "Raptor",   "aggr": 0.85, "caution": 0.3,  "range": 25.0, "boost_use": 0.7,  "colors": [Color(0.32, 0.06, 0.10), Color(1.0, 0.30, 0.22)], "belly": Color(0.88, 0.62, 0.50), "seed": 0.41},
 }
 
 var preset := "scav"
@@ -49,6 +53,8 @@ func configure(personality: String, world) -> void:
 	display_name = str(p["n"])
 	dorsal = Color(p["colors"][0])
 	accent = Color(p["colors"][1])
+	belly = Color(p.get("belly", Color(0.86, 0.78, 0.58)))
+	skin_seed = float(p.get("seed", randf()))
 	pattern = int(PERSONALITY_PATTERN.get(personality, 0))
 	aggression = float(p["aggr"])
 	caution = float(p["caution"])

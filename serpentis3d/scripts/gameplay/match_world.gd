@@ -7,8 +7,9 @@ signal match_event(kind: String, text: String)
 signal player_died
 
 const ARENA_R := 55.0
-const AI_TARGET := 10
-const PERSONALITY_POOL := ["hunter", "scav", "survivor", "speedy", "territor", "elite", "python", "viper", "mamba", "sidewinder"]
+const AI_TARGET := 13                 # desktop: full roster
+const MOBILE_AI_TARGET := 10          # phone: keep 40+ FPS; new villains lead the pool
+const PERSONALITY_POOL := ["cobra", "anaconda", "raptor", "hunter", "scav", "survivor", "speedy", "territor", "elite", "python", "viper", "mamba", "sidewinder"]
 const BOSS_LENGTH := 34.0
 
 var arena_radius := ARENA_R
@@ -34,6 +35,7 @@ var verbose := false
 var _hud_tick := 0    # HUD feed gate (15 Hz)
 var _eat_tick := 0    # eat-check gate (30 Hz)
 var boss_scheduled := false
+var _boss_retry_at := 0.0
 var _worst_dt := 0.0
 var _spawn_base_ang := 0.0
 var _ring_idx := 0
@@ -49,8 +51,12 @@ var _po := PackedInt32Array()
 var _id_map := {}
 var _milestones := {}
 var _pers_cycle := 0
+var ai_target := AI_TARGET
 
 func _ready() -> void:
+	# Mobile GPUs pay for every live serpent; 10 AI still includes Cobra,
+	# Anaconda and Raptor (they lead PERSONALITY_POOL) while desktop keeps 13.
+	ai_target = MOBILE_AI_TARGET if OS.get_name() == "Android" or OS.get_name() == "iOS" else AI_TARGET
 	_build_arena()
 	food = FoodSpawner.new()
 	food.arena_radius = arena_radius
@@ -96,20 +102,26 @@ func start_match() -> void:
 	running = true
 	_spawn_base_ang = randf() * TAU
 	_ring_idx = 0
-	# player
+	# player (must exist even in a pathological obstacle layout)
 	var p: PlayerSnake = PlayerSnake.new()
-	_attach(p, true, 7.0)
+	if not _attach(p, true, 7.0):
+		p.queue_free()
+		player = null
+		match_event.emit("warn", "NO CLEAR PLAYER SPAWN")
+		return
 	player = p
 	var touch: bool = OS.has_feature("android") or OS.has_feature("ios")
 	match_event.emit("info",
 		"DRAG ANYWHERE TO STEER — HOLD A 2ND FINGER TO BOOST" if touch
 		else "STEER WITH THE POINTER OR WASD / ARROWS — HOLD LMB/SPACE TO BOOST")
 	# AI roster (skippable in dev-solo runs)
-	var ai_target: int = AI_TARGET if not solo_dev else 0
-	for i in ai_target:
-		_spawn_ai()
+	var want_ai: int = ai_target if not solo_dev else 0
+	for i in want_ai:
+		if not _spawn_ai():
+			_respawn_queue.append({"at": 1.0 + 0.25 * float(i)})
 	# Boss appears mid-match
 	boss_scheduled = false
+	_boss_retry_at = 0.0
 
 func start_demo() -> void:
 	_clear()
@@ -136,16 +148,18 @@ func _clear() -> void:
 	player_cause = ""
 	last_kill_text = ""
 
-func _spawn_ai() -> void:
+func _spawn_ai() -> bool:
 	var pers: String = PERSONALITY_POOL[_pers_cycle % PERSONALITY_POOL.size()]
 	_pers_cycle += 1
 	var s := AISnake.new()
 	s.configure(pers, self)
 	s.spine_stride = 2   # phone tier: AI serpents rebuild the tube at 30 Hz
-	var start_len := randf_range(5.0, 20.0)
-	_attach(s, false, start_len)
+	# 14 opening seats need bodies short enough that one tail never reaches
+	# the next head. Growth in-match is unchanged.
+	var start_len := randf_range(5.0, 11.5)
+	return _attach(s, false, start_len)
 
-func _spawn_boss() -> void:
+func _spawn_boss() -> bool:
 	var s := AISnake.new()
 	s.configure("hunter", self)
 	s.spine_stride = 2
@@ -153,68 +167,44 @@ func _spawn_boss() -> void:
 	s.pattern = 1   # broad dark saddle bands — reads as "elite apex" from above
 	s.max_length = 90.0
 	s.display_name = "BOSS SERPENT"
-	_attach(s, false, BOSS_LENGTH)
-	match_event.emit("warn", "A BOSS SERPENT HAS ENTERED THE ARENA")
+	var ok := _attach(s, false, BOSS_LENGTH)
+	if ok:
+		match_event.emit("warn", "A BOSS SERPENT HAS ENTERED THE ARENA")
+	return ok
 
-func _attach(s: Snake, is_player: bool, start_len: float) -> void:
+## Spawn placement is validated against the arena boundary, every obstacle,
+## and all existing snake bodies. It never relies on a fixed random guess:
+## opening seats use equal-angle ring slots, mid-match entries use random
+## candidates plus a deterministic spiral fallback.
+func _attach(s: Snake, is_player: bool, start_len: float) -> bool:
+	if demo_mode:
+		start_len = randf_range(8.0, 14.0)
+	var total_for_ring := 1 if solo_dev else (ai_target + 1)
+	var ring_slot := -1
+	if not demo_mode and match_time < 0.5 and _ring_idx < total_for_ring:
+		ring_slot = _ring_idx
+		_ring_idx += 1
+	var min_dist := clampf(start_len * 0.8, 11.0, 24.0)
+	var pos := _find_spawn_pos(ring_slot, total_for_ring, min_dist)
+	if pos == Vector3.INF:
+		if is_player:
+			pos = _emergency_spawn_pos()
+		if pos == Vector3.INF:
+			if verbose:
+				print("SPAWN FAILED %s (no clear seat)" % ("PLAYER" if is_player else s.display_name))
+			return false
+	var ang := atan2(pos.x, pos.z)
+	# Ring seats move TANGENTIALLY (all same direction); scattered entries keep
+	# the old tangent-jitter heading.
+	var tape := ang + PI * 0.5 + (0.0 if ring_slot >= 0 else randf_range(-0.4, 0.4))
+	var dir := Vector3(sin(tape), 0.0, cos(tape))
 	s.id = _next_id
 	_next_id += 1
 	s.name = "Snake%d" % s.id
 	s.match_world = self
 	s.rim = _rim_for()
-	if demo_mode:
-		start_len = randf_range(8.0, 14.0)
-	# Opening fill (real matches): seat everyone on a tangent ring — equal
-	# spacing, identical rotation direction — so no snake spawns facing or
-	# converging on another. Mid-match entries (respawns / boss) scatter.
-	var total_for_ring := 1 if solo_dev else (AI_TARGET + 1)
-	var ring_slot := -1
-	if not demo_mode and match_time < 0.5 and _ring_idx < total_for_ring:
-		ring_slot = _ring_idx
-		_ring_idx += 1
-	var ang: float
-	var rad: float
-	if ring_slot >= 0:
-		ang = _spawn_base_ang + TAU * ring_slot / float(total_for_ring)
-		# Ring seats all share ONE circle: equal-speed tangential motion then
-		# preserves the angular gaps (different radius bands converge and
-		# cross lanes). Seat drift below keeps boulders out of the seat.
-		var rr: float = arena_radius * 0.58
-		var good := false
-		for attempt in 14:
-			var probe := Vector3(sin(ang) * rr, 0.0, cos(ang) * rr)
-			var clean := true
-			for ob in obstacles:
-				if probe.distance_to(ob["pos"] as Vector3) < float(ob["r"]) + 3.8:
-					clean = false
-					break
-			if clean:
-				good = true
-				break
-			var step: float = arena_radius * (0.025 + 0.012 * float(attempt))
-			rr = clampf(rr + (step if attempt % 2 == 0 else -step), arena_radius * 0.16, arena_radius * 0.86)
-		if good:
-			rad = rr
-	else:
-		ang = randf() * TAU
-		rad = arena_radius * randf_range(0.35, 0.72)
-	var pos := Vector3(sin(ang) * rad, 0.0, cos(ang) * rad)
-	# spawn separation: never materialize inside an existing snake's neighborhood
-	for attempt in 12:
-		ang = randf() * TAU
-		rad = arena_radius * randf_range(0.35, 0.72)
-		pos = Vector3(sin(ang) * rad, 0.0, cos(ang) * rad)
-		var clear := true
-		for o in snakes:
-			if is_instance_valid(o) and o.alive and o.head_pos.distance_to(pos) < 16.0:
-				clear = false
-				break
-		if clear:
-			break
-	# ring seats move TANGENTIALLY (all same direction); scattered entries
-	# keep the old tangent-jitter heading
-	var tape := ang + PI * 0.5 + randf_range(-0.4, 0.4) if ring_slot < 0 else ang + PI * 0.5
-	var dir := Vector3(sin(tape), 0.0, cos(tape))
+	s.grounded = true          # ride the arena surface, no vertical bob
+	s.vertical_wave = false
 	add_child(s)
 	_id_map[s.id] = s
 	s.spawn(pos, dir, start_len)
@@ -223,7 +213,86 @@ func _attach(s: Snake, is_player: bool, start_len: float) -> void:
 	AudioMgr.play("spawn", -6.0)
 	if verbose:
 		var who := "PLAYER" if is_player else s.display_name
-		print("SPAWN %s slot=%d pos=(%.1f,%.1f) rad=%.1f dir=(%.2f,%.2f)" % [who, ring_slot, pos.x, pos.z, pos.length(), dir.x, dir.z])
+		print("SPAWN %s slot=%d pos=(%.1f,%.1f) rad=%.1f dir=(%.2f,%.2f) len=%.1f" % [
+			who, ring_slot, pos.x, pos.z, pos.length(), dir.x, dir.z, start_len])
+	return true
+
+func _find_spawn_pos(ring_slot: int, total_for_ring: int, min_dist: float) -> Vector3:
+	if ring_slot >= 0:
+		var ang := _spawn_base_ang + TAU * ring_slot / float(maxi(total_for_ring, 1))
+		# One shared circle preserves equal angular gaps. Small radial seat
+		# drift only avoids boulders; it never changes the theme/arena state.
+		var base_r := arena_radius * 0.62
+		for attempt in 18:
+			var step: float = arena_radius * (0.018 + 0.010 * float(attempt))
+			var rr: float = clampf(base_r + (step if attempt % 2 == 0 else -step),
+				arena_radius * 0.30, arena_radius * 0.82)
+			var p := Vector3(sin(ang) * rr, 0.0, cos(ang) * rr)
+			if _spawn_clear(p, min_dist):
+				return p
+	# Mid-match / fallback: random candidates on open ground.
+	for attempt in 48:
+		var ang2 := randf() * TAU
+		var rad2 := arena_radius * randf_range(0.30, 0.80)
+		var p2 := Vector3(sin(ang2) * rad2, 0.0, cos(ang2) * rad2)
+		if _spawn_clear(p2, min_dist):
+			return p2
+	# Deterministic spiral fallback: guarantees a seat even after a crowded
+	# respawn wave, without an unbounded retry loop.
+	for ring in 8:
+		var rr2: float = arena_radius * (0.20 + 0.075 * float(ring))
+		var steps := 28 + ring * 8
+		var off := randf() * TAU
+		for k in steps:
+			var a := off + TAU * float(k) / float(steps)
+			var p3 := Vector3(sin(a) * rr2, 0.0, cos(a) * rr2)
+			if _spawn_clear(p3, min_dist):
+				return p3
+	return Vector3.INF
+
+func _emergency_spawn_pos() -> Vector3:
+	# Last-resort player seat: obstacle/boundary clean, snake separation waived.
+	for ring in 10:
+		var rr: float = arena_radius * (0.12 + 0.075 * float(ring))
+		var steps := 24 + ring * 8
+		for k in steps:
+			var a := TAU * float(k) / float(steps)
+			var p := Vector3(sin(a) * rr, 0.0, cos(a) * rr)
+			var clean := true
+			for ob in obstacles:
+				if p.distance_to(ob["pos"] as Vector3) < float(ob["r"]) + 2.0:
+					clean = false
+					break
+			if clean:
+				return p
+	return Vector3.INF
+
+func _spawn_clear(pos: Vector3, min_dist: float) -> bool:
+	if pos.length() > arena_radius - 4.0:
+		return false
+	for ob in obstacles:
+		var op: Vector3 = ob["pos"]
+		if pos.distance_to(op) < float(ob["r"]) + 3.0:
+			return false
+	for o in snakes:
+		if not is_instance_valid(o) or not o.alive:
+			continue
+		if o.head_pos.distance_to(pos) < min_dist:
+			return false
+		# Body separation even before the first spine tick: estimate the tail
+		# from the live heading, then use real stations once available.
+		var fwd: Vector3 = Vector3(sin(float(o.heading)), 0.0, cos(float(o.heading)))
+		var body_len: float = maxf(float(o.length), float(o.target_length))
+		var tail: Vector3 = o.head_pos - fwd * body_len
+		if pos.distance_to(tail) < min_dist * 0.60:
+			return false
+		var n: int = o.coll_pos.size()
+		if n > 0:
+			var step_i: int = maxi(1, int(n / 10.0))
+			for j in range(0, n, step_i):
+				if pos.distance_to(o.coll_pos[j]) < min_dist * 0.50:
+					return false
+	return true
 
 func is_boss_alive() -> bool:
 	for s in snakes:
@@ -257,22 +326,25 @@ func _physics_process(delta: float) -> void:
 			rs_v / (1024.0 * 1024.0), float(pt) * 1000.0, float(pr) * 1000.0])
 		_worst_dt = 0.0
 
-	# boss appears in real matches after 60 s
-	if not demo_mode and not boss_scheduled and match_time > 60.0 and snake_count() > 2:
-		boss_scheduled = true
-		_spawn_boss()
+	# boss appears in real matches after 60 s; retry if the arena is crowded
+	if not demo_mode and not boss_scheduled and match_time > 60.0 \
+			and snake_count() > 2 and match_time >= _boss_retry_at:
+		if _spawn_boss():
+			boss_scheduled = true
+		else:
+			_boss_retry_at = match_time + 1.5
 	elif demo_mode and not boss_scheduled and match_time > 30.0:
 		boss_scheduled = true  # no boss in demo; just latch
 
 	# AI respawn trickle
 	if not _respawn_queue.is_empty():
-		var due_int := false
 		for r in _respawn_queue.duplicate():
 			if match_time >= float(r["at"]):
 				_respawn_queue.erase(r)
-				if snake_count() < AI_TARGET + 1:
-					_spawn_ai()
-					due_int = true
+				if snake_count() < ai_target + 1:
+					if not _spawn_ai():
+						r["at"] = match_time + 1.0
+						_respawn_queue.append(r)
 					break
 		# only one respawn per frame
 
@@ -454,8 +526,17 @@ func _eat_checks() -> void:
 		if s.ability_active("magnet"):
 			reach *= 4.5
 		var mouth: Vector3 = s.mouth_pos
+		# Two swept capsules per eat tick: the JAWS (front bite) and the HEAD
+		# CENTRE (a fruit the skull visibly covers but the tiny mouth point can
+		# miss, especially in a sharp turn). fly_rec() still claims each fruit
+		# exactly once, so overlapping hits can never double-score.
 		var hits: Array = food.eat_hits_sweep(s.mouth_prev, mouth, reach)
+		var head_reach: float = s.head_radius() * 1.25
+		if s.ability_active("magnet"):
+			head_reach *= 4.5
+		hits.append_array(food.eat_hits_sweep(s.head_prev, s.head_pos, head_reach))
 		s.mouth_prev = mouth
+		s.head_prev = s.head_pos
 		for h in hits:
 			var k := int(h["kind"])
 			var rec: Dictionary = h["rec"]

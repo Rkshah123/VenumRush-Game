@@ -33,6 +33,7 @@ var _skin_buttons: Array[Button] = []
 var _preview_snake: Node3D = null
 var _preview_vp: SubViewport = null
 var _preview_cam: Camera3D = null
+var _preview_env: Environment = null
 var _preview_yaw := 0.0
 var _arena_label: Label
 var _arena_sub: Label
@@ -60,7 +61,7 @@ var _over_panel: PanelContainer
 var _over_title: Label
 var _over_lines: Label
 
-# Theme palettes live in UiTheme (CLASSIC / DARK). Static role accessors keep
+# Theme palettes live in UiTheme (LIGHT / DARK). Static role accessors keep
 # external callers (match_world popups) theme-aware.
 static func role_color(role: String) -> Color:
 	return UiTheme.c(role)
@@ -101,7 +102,7 @@ func _ready() -> void:
 	# sound toggle state
 	AudioServer.set_bus_mute(0, int(SaveMgr.get_value("muted", 0)) == 1)
 	# restore the saved theme across menus, HUD, panels and scrims
-	apply_theme(int(SaveMgr.get_value("theme", UiTheme.CLASSIC)))
+	apply_theme(int(SaveMgr.get_value("theme", UiTheme.LIGHT)))
 
 # ---------------------------------------------------------------- gameplay
 
@@ -545,7 +546,7 @@ func _build_menu() -> void:
 	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	brand.add_child(logo)
 	_menu_logo = logo
-	var title := _mk_label("SERPENTIS 3D", int((48 if land else 52) * _ui_s), "accent", brand)
+	var title := _mk_label("VENOMRUSH", int((48 if land else 52) * _ui_s), "accent", brand)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_color_override("font_shadow_color", UiTheme.c("title_shadow"))
 	title.add_theme_constant_override("shadow_offset_y", 4)
@@ -590,7 +591,7 @@ func _build_menu() -> void:
 	var hint := _mk_label("", int(13 * _ui_s), "dim", _menu_main)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.text = "mouse steers, LMB boosts" if not _is_touch_device() else "drag steers, 2nd finger boosts"
-	hint.text = "OFFLINE BUILD v0.1 - " + hint.text
+	hint.text = "OFFLINE BUILD v1.1 - " + hint.text
 
 	# ---------------------------------------------------------- orientation
 	# The action column sits on a soft themed card so every page — SNAKES, HOW
@@ -633,6 +634,7 @@ func _build_menu() -> void:
 	_build_skins_menu(act)
 	_menu_skins.visible = false
 	_menu_page(_page)
+	_refresh_options()
 	call_deferred("_animate_menu_intro")
 
 func _build_settings_page(act: Container) -> void:
@@ -781,9 +783,9 @@ func _refresh_arena_chrome() -> void:
 			(idx + 1) if idx >= 0 else 1, ArenaPresets.ORDER.size()]
 
 func _refresh_theme_chrome() -> void:
-	var id := int(SaveMgr.get_value("theme", UiTheme.CLASSIC))
+	var id := int(SaveMgr.get_value("theme", UiTheme.LIGHT))
 	if _theme_sub != null and is_instance_valid(_theme_sub):
-		_theme_sub.text = "%s PALETTE  ·  AFFECTS UI + MATCH" % UiTheme.NAMES[clampi(id, 0, UiTheme.NAMES.size() - 1)]
+		_theme_sub.text = "%s PALETTE  ·  MENU + HUD" % UiTheme.NAMES[clampi(id, 0, UiTheme.NAMES.size() - 1)]
 func _refresh_records() -> void:
 	# identity line under the tagline: personal bests from the save file
 	if _rec_best_lab == null or not is_instance_valid(_rec_best_lab):
@@ -951,6 +953,7 @@ func _build_skins_menu(vroot: Container) -> void:
 	env.ambient_light_color = Color(0.5, 0.55, 0.62)
 	env.ambient_light_energy = 1.2
 	amb.environment = env
+	_preview_env = env
 	vp.add_child(amb)
 	_preview_cam = Camera3D.new()
 	_preview_cam.position = Vector3(0, 2.4, 4.6)
@@ -1450,18 +1453,21 @@ func _style_button(b: Control, primary: bool = false) -> void:
 ## reads as a polished material edge, never as a border. Idempotent because
 ## apply_theme() re-styles every themed button on every theme switch.
 func _add_sheen(b: Control) -> void:
-	if b.has_node("Sheen"):
-		return
-	var line := ColorRect.new()
-	line.name = "Sheen"
-	line.color = Color(1.0, 1.0, 1.0, 0.07)
-	line.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	line.anchor_right = 1.0
-	line.offset_left = 11
-	line.offset_right = -11
-	line.offset_top = 2
-	line.offset_bottom = 3
-	b.add_child(line)
+	var line: ColorRect = b.get_node_or_null("Sheen") as ColorRect
+	if line == null:
+		line = ColorRect.new()
+		line.name = "Sheen"
+		line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		line.anchor_right = 1.0
+		line.offset_left = 11
+		line.offset_right = -11
+		line.offset_top = 2
+		line.offset_bottom = 3
+		b.add_child(line)
+	# Light theme: a dark hairline reads as an edge; on dark theme a white
+	# hairline reads as a light catch. Re-applied on every theme switch.
+	line.color = Color(0.0, 0.0, 0.0, 0.07) if not UiTheme.is_dark() \
+		else Color(1.0, 1.0, 1.0, 0.07)
 
 ## Apply a theme to EVERY themed control (menus, settings, HUD, panels,
 ## buttons, bars, popups, scrims). Called on boot and when the player switches
@@ -1502,6 +1508,14 @@ func apply_theme(id: int) -> void:
 	_refresh_arena_chrome()
 	_refresh_theme_chrome()
 	_refresh_skin_buttons()
+	if _menu_title != null and is_instance_valid(_menu_title):
+		_menu_title.add_theme_color_override("font_shadow_color", UiTheme.c("title_shadow"))
+	if _preview_env != null and is_instance_valid(_preview_env):
+		_preview_env.ambient_light_color = Color(0.50, 0.55, 0.62) if UiTheme.is_dark() \
+			else Color(0.70, 0.74, 0.70)
+		_preview_env.ambient_light_energy = 1.20 if UiTheme.is_dark() else 0.95
+		_preview_env.background_color = Color(0.03, 0.05, 0.08, 1.0) if UiTheme.is_dark() \
+			else Color(0.88, 0.91, 0.87, 1.0)
 	if _preview_snake != null and is_instance_valid(_preview_snake):
 		_preview_snake.set_rim(0.55 if UiTheme.is_dark() else 0.12)
 

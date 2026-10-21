@@ -412,6 +412,7 @@ func fly_rec(rec: Dictionary, eater: Node3D) -> bool:
 	var kind := int(rec["kind"])
 	var from: Vector3 = rec.get("vis", (rec["pos"] as Vector3) + Vector3.UP * (BOB_BASE[kind] + 0.18))
 	rec["fly"] = {"t": 0.0, "from": from, "snake": eater,
+		"start_ms": Time.get_ticks_msec(),
 		"dur": clampf(from.distance_to(_mouth_of(eater)) * 0.085, FLY_TIME, FLY_TIME_MAX)}
 	return true
 

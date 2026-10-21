@@ -1,6 +1,6 @@
 class_name EnvironmentBuilder
 extends Node3D
-## SERPENTIS 3D — natural 3D environment around the playable court.
+## VenomRush — natural 3D environment around the playable court.
 ## Builds the flat gameplay disc, rolling terrace hills, distant mountain
 ## ranges, a river + lake (with waterfall), instanced trees / grass / bushes /
 ## rocks / flowers, animated water, sky, sun and atmosphere. Vegetation stays

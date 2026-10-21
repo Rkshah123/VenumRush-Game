@@ -1,17 +1,18 @@
 class_name MenuWorld
 extends Node3D
-## SERPENTIS 3D — dedicated home-screen scene.
+## VenomRush — dedicated home-screen scene.
 ##
 ## The living cinematic backdrop the main menu plays over: real snakes gliding
 ## on curved wander paths (the SAME Snake class as gameplay, so the menu and
-## the match look identical), drifting dust motes, glowing orbs, and a void
-## stage with a soft radial glow. It has its OWN WorldEnvironment and ground —
-## the gameplay arena is never rendered behind the menu.
+## the match look identical), drifting dust motes, glowing orbs, and a stage
+## with a soft radial glow. It has its OWN WorldEnvironment and ground — the
+## gameplay arena is never rendered behind the menu.
 ##
 ## Game toggles it: menu = awake (visible + running), gameplay = fully dormant
 ## (invisible AND process-disabled), so none of this costs anything in a match.
+## `dark` is the MAIN-MENU theme only; arena presets own their own palettes.
 
-@export var dark := false   # Dark Theme pass (set by Game at boot / theme change)
+@export var dark := false   # main-menu theme pass (set by Game on theme change)
 
 var tier := 2
 var snakes: Array = []      # living menu serpents
@@ -19,6 +20,10 @@ var _t := 0.0
 
 var _env: Environment              # this scene's sky / ambient / glow
 var _stage_mat: ShaderMaterial     # radial glow stage shader
+var _sun: DirectionalLight3D
+var _fill: DirectionalLight3D
+var _disc_mat: StandardMaterial3D
+var _dimmed: Array = []            # far-layer snakes re-tinted on theme switch
 var _orb_nodes: Array = []
 var _orb_seed: Array = []          # [phase, speed, base_y, base_x, base_z]
 var _rng := RandomNumberGenerator.new()
@@ -44,53 +49,71 @@ func _ready() -> void:
 func _build_environment() -> void:
 	var amb := WorldEnvironment.new()
 	_env = Environment.new()
-	_apply_env_colors()
 	amb.environment = _env
 	add_child(amb)
 	# soft key light from high front-left: models out of the void
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-58, -34, 0)
-	sun.light_energy = 1.30
-	sun.light_color = Color(0.82, 0.92, 1.0) if dark else Color(0.90, 0.95, 1.0)
-	sun.light_indirect_energy = 0.40
+	_sun = DirectionalLight3D.new()
+	_sun.rotation_degrees = Vector3(-58, -34, 0)
+	_sun.light_indirect_energy = 0.40
 	# contact shadows ground the serpents on the stage — desktop tier only,
 	# phones (tier 0) keep the free no-shadow menu pass
-	sun.shadow_enabled = tier >= 1
-	if sun.shadow_enabled:
-		sun.directional_shadow_max_distance = 90.0
-		sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
-	add_child(sun)
+	_sun.shadow_enabled = tier >= 1
+	if _sun.shadow_enabled:
+		_sun.directional_shadow_max_distance = 90.0
+		_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
+	add_child(_sun)
 	# faint cool fill from the other side for readable silhouette edges
-	var fill := DirectionalLight3D.new()
-	fill.rotation_degrees = Vector3(-38, 128, 0)
-	fill.light_energy = 0.22
-	fill.light_color = Color(0.35, 0.55, 0.75)
-	add_child(fill)
+	_fill = DirectionalLight3D.new()
+	_fill.rotation_degrees = Vector3(-38, 128, 0)
+	add_child(_fill)
+	_apply_env_colors()
+	_apply_light_colors()
+
+func _menu_bg() -> Color:
+	# Stage edge and environment background must be identical, otherwise the
+	# oversized plane shows a false horizon line.
+	return Color(0.010, 0.018, 0.030) if dark else Color(0.855, 0.895, 0.865)
+
+func menu_bg_color() -> Color:
+	return _menu_bg()
 
 func _apply_env_colors() -> void:
-	# BG_COLOR + ambient color: the cheapest atmospheric backdrop — a deep navy
-	# void matching the stage plane's edge tone so there is no horizon seam.
+	# BG_COLOR + ambient color: the cheapest atmospheric backdrop. Light mode
+	# is a pale sage studio; dark mode is a deep navy void. The stage plane's
+	# edge tone is set to this exact color in _apply_stage_colors().
 	_env.background_mode = Environment.BG_COLOR
-	_env.background_color = Color(0.010, 0.018, 0.030) if dark else Color(0.030, 0.040, 0.052)
-	var amb_c := Color(0.15, 0.21, 0.30) if dark else Color(0.22, 0.27, 0.34)
+	_env.background_color = _menu_bg()
+	var amb_c := Color(0.15, 0.21, 0.30) if dark else Color(0.66, 0.72, 0.67)
 	_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	_env.ambient_light_color = amb_c
-	_env.ambient_light_energy = 0.38 if dark else 0.32
+	_env.ambient_light_energy = 0.38 if dark else 0.62
 	_env.glow_enabled = tier >= 1
-	_env.glow_intensity = 0.7 if dark else 0.45
-	_env.glow_bloom = 0.10 if dark else 0.06
-	_env.glow_hdr_threshold = 0.92 if dark else 1.0
+	_env.glow_intensity = 0.7 if dark else 0.24
+	_env.glow_bloom = 0.10 if dark else 0.025
+	_env.glow_hdr_threshold = 0.92 if dark else 1.15
 	_env.fog_enabled = false
 	_env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	_env.tonemap_exposure = 1.12 if dark else 1.02
+	_env.tonemap_exposure = 1.12 if dark else 1.0
+
+func _apply_light_colors() -> void:
+	if _sun != null:
+		_sun.light_energy = 1.30 if dark else 1.42
+		_sun.light_color = Color(0.82, 0.92, 1.0) if dark else Color(1.0, 0.96, 0.87)
+	if _fill != null:
+		_fill.light_energy = 0.22 if dark else 0.30
+		_fill.light_color = Color(0.35, 0.55, 0.75) if dark else Color(0.58, 0.72, 0.86)
 
 func set_dark(v: bool) -> void:
 	dark = v
 	_apply_env_colors()
+	_apply_light_colors()
 	_apply_stage_colors()
+	_apply_disc_color()
 	for s in snakes:
 		if is_instance_valid(s):
 			s.set_rim(0.42 if dark else 0.16)
+			if s.has_meta("menu_dim"):
+				_dim_snake(s)
 
 # ---------------------------------------------------------------- stage
 
@@ -118,25 +141,29 @@ func _build_stage() -> void:
 	dm.size = Vector2(84, 84)
 	disc.mesh = dm
 	disc.position.y = -1.31
-	var dmat := StandardMaterial3D.new()
-	dmat.albedo_color = Color(0.02, 0.032, 0.044, 0.8)
-	dmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	dmat.roughness = 1.0
-	disc.material_override = dmat
+	_disc_mat = StandardMaterial3D.new()
+	_disc_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_disc_mat.roughness = 1.0
+	disc.material_override = _disc_mat
 	disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(disc)
+	_apply_disc_color()
 
 func _apply_stage_colors() -> void:
 	if _stage_mat == null or _stage_mat.shader == null:
 		return
+	_stage_mat.set_shader_parameter(&"u_a", _menu_bg())
 	if dark:
-		_stage_mat.set_shader_parameter(&"u_a", Color(0.010, 0.018, 0.030))
 		_stage_mat.set_shader_parameter(&"u_b", Color(0.018, 0.052, 0.058))
 		_stage_mat.set_shader_parameter(&"u_glow", Color(0.16, 0.85, 0.72))
 	else:
-		_stage_mat.set_shader_parameter(&"u_a", Color(0.030, 0.040, 0.052))
-		_stage_mat.set_shader_parameter(&"u_b", Color(0.052, 0.086, 0.094))
-		_stage_mat.set_shader_parameter(&"u_glow", Color(0.14, 0.80, 0.68))
+		_stage_mat.set_shader_parameter(&"u_b", Color(0.905, 0.945, 0.895))
+		_stage_mat.set_shader_parameter(&"u_glow", Color(0.22, 0.78, 0.64))
+
+func _apply_disc_color() -> void:
+	if _disc_mat != null:
+		_disc_mat.albedo_color = Color(0.02, 0.032, 0.044, 0.80) if dark \
+			else Color(0.46, 0.58, 0.50, 0.30)
 
 # ---------------------------------------------------------------- ambience
 
@@ -260,6 +287,8 @@ func _build_snakes() -> void:
 			s.spine_stride = 2 if tier == 0 else 1   # phones: tube refresh at 30 Hz
 			s.scale = Vector3.ONE * float(layer[3])           # apparent distance
 			if bool(layer[4]):
+				s.set_meta("menu_dim", true)
+				_dimmed.append(s)
 				_dim_snake(s)
 			var s_len := float(layer[2]) * _rng.randf_range(0.85, 1.2)
 			s.spawn(Vector3(_rng.randf_range(-12, 12), 0.0, _rng.randf_range(-12, 12)),
@@ -276,7 +305,9 @@ func _build_snakes() -> void:
 func _dim_snake(s: Snake) -> void:
 	var m := s.get_body_material()
 	if m != null:
-		var to_dark := Color(0.13, 0.20, 0.27) if dark else Color(0.24, 0.30, 0.36)
+		# Far silhouettes: darker than the light stage, lighter than the dark
+		# stage, so depth reads in BOTH menu themes without swallowing detail.
+		var to_dark := Color(0.13, 0.20, 0.27) if dark else Color(0.32, 0.40, 0.43)
 		m.set_shader_parameter(&"u_dorsal", to_dark)
 		m.set_shader_parameter(&"u_accent", to_dark.lightened(0.10))
 		m.set_shader_parameter(&"u_belly", to_dark.lightened(0.06))

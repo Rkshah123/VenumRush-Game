@@ -1,6 +1,6 @@
 class_name TouchJoystick
 extends Control
-## SERPENTIS 3D — mobile touch steering stick (spec: continuous 360° heading).
+## VenomRush — mobile touch steering stick (spec: continuous 360° heading).
 ##
 ## Behaviour the spec asks for, all of it steering the EXISTING heading system
 ## (the snake never teleports, it turns toward the stick at its normal rate):

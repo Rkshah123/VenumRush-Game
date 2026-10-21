@@ -14,7 +14,7 @@ var _cam_angle := 0.0
 var _cam_pos := Vector3(0, 18, 38)
 var _gfx_mode := 1               # 0 = 2D top-down, 1 = 3D TPS (settings)
 var _cam_2d_h := 27.0            # smoothed 2D camera height (zoom easing)
-var _theme_id := 0               # UiTheme.CLASSIC / DARK (settings)
+var _theme_id := 0               # UiTheme.LIGHT / DARK (main-menu + HUD theme)
 var _topdown_dist := 0.0        # fixed camera distance fitting the whole arena
 var _topdown_dirty := true
 var _cam_look := Vector3.ZERO
@@ -45,6 +45,8 @@ var _spawntest := false
 var _powertest := false
 var _eat_test := false
 var _skins_test := false
+var _body_test := false
+var _villain_test := false
 var _skin_dev := -1
 var _diag_t := 0.0
 
@@ -103,6 +105,14 @@ func _ready() -> void:
 		if a == "--skins-test":
 			_autoplay = true
 			_skins_test = true
+		if a == "--body-test":
+			_autoplay = true
+			_body_test = true
+			_solo_dev = true
+			_no_death_dev = true
+		if a == "--villain-test":
+			_autoplay = true
+			_villain_test = true
 		if a == "--theme-test":
 			_autoplay = true
 			_theme_test = true
@@ -133,7 +143,7 @@ func _ready() -> void:
 	elif not ArenaPresets.ALL.has(_arena_key):
 		_arena_key = "valley"
 	_gfx_mode = int(SaveMgr.get_value("gfx_mode", 1))
-	_theme_id = int(SaveMgr.get_value("theme", UiTheme.CLASSIC))
+	_theme_id = int(SaveMgr.get_value("theme", UiTheme.LIGHT))
 	hud = GameHud.new()
 	add_child(hud)
 	# The home-screen backdrop is its own cinematic scene, never the arena.
@@ -186,7 +196,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--eat-test", "--skins-test", "--theme-test", "--uix-test", "--mode-test", "--joystick", "--joy-test", "--dir-test", "--ctrl-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--eat-test", "--skins-test", "--body-test", "--villain-test", "--theme-test", "--uix-test", "--mode-test", "--joystick", "--joy-test", "--dir-test", "--ctrl-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -294,6 +304,12 @@ func _dev_sequence() -> void:
 	await get_tree().create_timer(0.6).timeout
 	_start_play()
 	print("DEV: play started")
+	if _body_test:
+		await _body_test_run()
+		return
+	if _villain_test:
+		await _villain_test_run()
+		return
 	if _uix_test:
 		await _uix_test_run()
 		return
@@ -313,6 +329,7 @@ func _dev_sequence() -> void:
 		await _touch_test_run()
 		return
 	if _spawntest:
+		match_world.no_death = true
 		await get_tree().create_timer(7.0).timeout
 		print("SPAWNTEST done — survives=", match_world.player != null and match_world.player.alive)
 		_quit_nicely()
@@ -497,6 +514,216 @@ const DIR_KEYS := [
 func _frames(n: int) -> void:
 	for i in n:
 		await get_tree().physics_frame
+
+# ---------------------------------------------------------------- body QA
+
+## Measure the rendered spine: station spacing vs the ideal arc step, vertical
+## spread, and whether the first station still starts at the head.
+func _body_metrics(s: Snake) -> Dictionary:
+	var ds := s.length / float(Snake.RING_COUNT - 1)
+	var sp: PackedFloat32Array = s._spine
+	var max_err := 0.0
+	var min_gap := 1e9
+	var max_gap := 0.0
+	var y_min := 1e9
+	var y_max := -1e9
+	var worst_i := 0
+	for i in range(1, Snake.RING_COUNT):
+		var o0 := (i - 1) * 4
+		var o1 := i * 4
+		var gap := Vector2(sp[o1] - sp[o0], sp[o1 + 2] - sp[o0 + 2]).length()
+		min_gap = minf(min_gap, gap)
+		if gap > max_gap:
+			max_gap = gap
+			worst_i = i
+		var e := absf(gap - ds) / maxf(ds, 0.0001)
+		max_err = maxf(max_err, e)
+		y_min = minf(y_min, sp[o1 + 1])
+		y_max = maxf(y_max, sp[o1 + 1])
+	var raw_min := 1e9
+	var raw_max := 0.0
+	for i in range(1, Snake.RING_COUNT):
+		var rg := s._raw[i].distance_to(s._raw[i - 1])
+		raw_min = minf(raw_min, rg)
+		raw_max = maxf(raw_max, rg)
+	var hist_len := float(maxi(s._hist_count - 1, 0)) * Snake.SPACING
+	return {
+		"raw_min": raw_min,
+		"raw_max": raw_max,
+		"worst_i": worst_i,
+		"ds": ds,
+		"max_err": max_err,
+		"min_gap": min_gap,
+		"max_gap": max_gap,
+		"y_min": y_min,
+		"y_max": y_max,
+		"y_span": y_max - y_min,
+		"hist_len": hist_len,
+		"head_xz": Vector2(sp[0], sp[2]).length(),
+		"lift": s.body_lift,
+		"root_y": s.global_position.y,
+	}
+
+func _body_test_run() -> void:
+	var p: PlayerSnake = match_world.player if match_world != null else null
+	if p == null:
+		print("BODYTEST FAIL no player")
+		_quit_nicely()
+		return
+	match_world.no_death = true
+	p.autopilot = false
+	p.keyboard_only = true
+	p.clear_keys()
+	p.input_boost = false
+	# Long body: exercises both the long-spawn history extension and the
+	# tightest curves the real steering can make.
+	p.length = 70.0
+	p.target_length = 70.0
+	await _frames(12)
+	var fail := 0
+	var turns: Array[float] = [0.0, PI * 0.5, -PI * 0.5, PI, PI * 0.5, -PI * 0.75]
+	for mode in 2:
+		hud.mode_changed.emit(mode)
+		await _frames(16)
+		for ti in turns.size():
+			var fwd := Vector3(sin(p.heading), 0.0, cos(p.heading))
+			p.desired_dir = fwd.rotated(Vector3.UP, turns[ti])
+			await _frames(18)
+			var m := _body_metrics(p)
+			var ok: bool = m["max_err"] < 0.30 and m["y_span"] < 0.01 \
+				and m["hist_len"] + 0.01 >= p.length and m["head_xz"] < 0.001 \
+				and m["root_y"] == 0.0 and m["lift"] > 0.20
+			if not ok:
+				fail += 1
+			print("BODYTEST mode=%d turn=%d gap=%.3f..%.3f err=%.3f yspan=%.4f hist=%.1f/%.1f lift=%.2f %s" % [
+				mode, ti, m["min_gap"], m["max_gap"], m["max_err"], m["y_span"],
+				m["hist_len"], p.length, m["lift"], "PASS" if ok else "FAIL"])
+	# Frame-rate independence: the exact arc-length history must produce the
+	# same station spacing at 30 Hz and 90 Hz (the old code did not).
+	var fps_err: Array[float] = []
+	for hz in [30, 90]:
+		Engine.physics_ticks_per_second = hz
+		await _frames(6)
+		var fwd2 := Vector3(sin(p.heading), 0.0, cos(p.heading))
+		p.desired_dir = fwd2.rotated(Vector3.UP, PI * 0.5)
+		await _frames(30 if hz == 30 else 90)
+		var m2 := _body_metrics(p)
+		fps_err.append(float(m2["max_err"]))
+		var ok2: bool = m2["max_err"] < 0.30 and m2["y_span"] < 0.01
+		if not ok2:
+			fail += 1
+		print("BODYTEST fps=%d gap_err=%.3f yspan=%.4f %s" % [
+			hz, m2["max_err"], m2["y_span"], "PASS" if ok2 else "FAIL"])
+	Engine.physics_ticks_per_second = 60
+	var fps_ok: bool = fps_err.size() == 2 and absf(fps_err[0] - fps_err[1]) < 0.20
+	if not fps_ok:
+		fail += 1
+	print("BODYTEST fps-independence delta=%.3f %s" % [
+		absf(fps_err[0] - fps_err[1]) if fps_err.size() == 2 else -1.0,
+		"PASS" if fps_ok else "FAIL"])
+	print("BODYTEST done — %s" % ("PASS" if fail == 0 else "FAIL"))
+	_quit_nicely()
+
+# ---------------------------------------------------------------- villain QA
+
+func _villain_test_run() -> void:
+	if match_world == null or match_world.player == null:
+		print("VILLAINTEST FAIL no match")
+		_quit_nicely()
+		return
+	match_world.no_death = true
+	await _frames(4)
+	var ais: Array = []
+	for s in match_world.snakes:
+		if s != match_world.player and s is AISnake and s.alive:
+			ais.append(s)
+	var names := {}
+	var presets := {}
+	var colors := {}
+	var min_head := 1e9
+	var min_body := 1e9
+	var obstacle_ok := true
+	for s in match_world.snakes:
+		if not is_instance_valid(s) or not s.alive:
+			continue
+		for ob in match_world.obstacles:
+			if s.head_pos.distance_to(ob["pos"] as Vector3) < float(ob["r"]) + 0.25:
+				obstacle_ok = false
+		for s2 in match_world.snakes:
+			if s2 == s or not is_instance_valid(s2) or not s2.alive:
+				continue
+			min_head = minf(min_head, s.head_pos.distance_to(s2.head_pos))
+			var n1: int = s.coll_pos.size()
+			var n2: int = s2.coll_pos.size()
+			if n1 > 0 and n2 > 0:
+				var st1: int = maxi(1, int(n1 / 18.0))
+				var st2: int = maxi(1, int(n2 / 18.0))
+				for i in range(0, n1, st1):
+					for j in range(0, n2, st2):
+						min_body = minf(min_body, s.coll_pos[i].distance_to(s2.coll_pos[j]))
+	for s in ais:
+		names[s.display_name] = true
+		presets[s.preset] = true
+		colors[str(s.dorsal)] = true
+	var count_ok: bool = ais.size() == MatchWorld.AI_TARGET
+	var distinct_ok: bool = names.size() == ais.size() and presets.size() == ais.size() \
+		and colors.size() == ais.size()
+	var spawn_ok: bool = min_head > 6.0 and min_body > 0.9 and obstacle_ok
+	var mobile_pool: Array = MatchWorld.PERSONALITY_POOL.slice(0, MatchWorld.MOBILE_AI_TARGET)
+	var mobile_new_ok := true
+	for n in ["cobra", "anaconda", "raptor"]:
+		if not mobile_pool.has(n):
+			mobile_new_ok = false
+	print("VILLAINTEST mobile-roster size=%d new-villains=%s %s" % [
+		mobile_pool.size(), str(mobile_new_ok), "PASS" if mobile_new_ok else "FAIL"])
+	print("VILLAINTEST roster=%d names=%d presets=%d colors=%d min_head=%.1f min_body=%.1f obstacles=%s %s" % [
+		ais.size(), names.size(), presets.size(), colors.size(), min_head, min_body,
+		str(obstacle_ok), "PASS" if count_ok and distinct_ok and spawn_ok else "FAIL"])
+
+	var start_pos: Array[Vector3] = []
+	var start_head: Array[float] = []
+	for s in ais:
+		start_pos.append(s.head_pos)
+		start_head.append(s.heading)
+	await _frames(180)
+	var moved := 0
+	var turned := 0
+	var body_ok := true
+	var inside := true
+	var worst_err := 0.0
+	var worst_y := 0.0
+	for i in ais.size():
+		var s: AISnake = ais[i]
+		if not is_instance_valid(s) or not s.alive:
+			body_ok = false
+			continue
+		if s.head_pos.distance_to(start_pos[i]) > 0.6:
+			moved += 1
+		if absf(wrapf(s.heading - start_head[i], -PI, PI)) > 0.12:
+			turned += 1
+		if s.head_pos.length() > match_world.arena_radius + 2.0:
+			inside = false
+		var m := _body_metrics(s)
+		worst_err = maxf(worst_err, float(m["max_err"]))
+		worst_y = maxf(worst_y, float(m["y_span"]))
+		if float(m["max_err"]) >= 0.30:
+			var wi: int = int(m["worst_i"])
+			var w0 := (wi - 1) * 4
+			var w1 := wi * 4
+			print("VILLAINTEST body %s len=%.1f hist=%.1f gap=%.3f..%.3f raw=%.3f..%.3f err=%.3f wi=%d sp0=(%.3f,%.3f) sp1=(%.3f,%.3f) stride=%d tick=%d head=(%.1f,%.1f)" % [
+				s.display_name, s.length, m["hist_len"], m["min_gap"], m["max_gap"],
+				m["raw_min"], m["raw_max"], m["max_err"], wi,
+				s._spine[w0], s._spine[w0 + 2], s._spine[w1], s._spine[w1 + 2],
+				s.spine_stride, s._spine_tick, s.head_pos.x, s.head_pos.z])
+		if not s.grounded or s.body_lift < 0.20 or m["max_err"] >= 0.30 or m["y_span"] >= 0.01:
+			body_ok = false
+	var ai_ok: bool = moved == ais.size() and turned >= maxi(1, ais.size() - 2) \
+		and body_ok and inside
+	print("VILLAINTEST live moved=%d/%d turned=%d/%d inside=%s body=%s worst_gap=%.3f yspan=%.4f fps=%d %s" % [
+		moved, ais.size(), turned, ais.size(), str(inside), str(body_ok), worst_err, worst_y,
+		Engine.get_frames_per_second(), "PASS" if ai_ok else "FAIL"])
+	print("VILLAINTEST done — %s" % ("PASS" if count_ok and distinct_ok and spawn_ok and ai_ok and mobile_new_ok else "FAIL"))
+	_quit_nicely()
 
 func _key_event(code: int, pressed: bool) -> void:
 	_key_event_mod(code, pressed, false)
@@ -932,81 +1159,122 @@ func _uix_test_run() -> void:
 # ---------------------------------------------------------------- theme QA
 
 func _theme_test_run() -> void:
-	# Dark Theme + graphics-mode QA: palette contrast report, both themes
-	# applied to the live UI, persistence, and mode switching through the
-	# real settings signal path (no gameplay state is touched).
+	# LIGHT/DARK menu QA: palette truth, live switch through the REAL menu
+	# pills, independence from ARENA, and arena night-pass independence.
 	print(UiTheme.theme_report())
 	var arena0 := str(SaveMgr.get_value("arena", "valley"))
-	var theme0 := int(SaveMgr.get_value("theme", UiTheme.CLASSIC))
-	for t in 2:
-		SaveMgr.set_value("theme", t)
-		hud.apply_theme(t)
-		await get_tree().process_frame
-		print("THEMETEST applied=%s accent=%s" % [UiTheme.theme_name(t), str(UiTheme.c("accent"))])
-		if not is_equal_approx(UiTheme.c("accent").get_luminance(), UiTheme.c("accent").get_luminance()):
-			print("THEMETEST FAIL accent")
-			_quit_nicely()
-			return
-	# ------------------------------------------------ main-menu separations
-	# The two labelled selector sections must be independent and truthful.
-	# Drive the REAL menu theme pills / arena chevrons, not internal setters.
-	var dark_btn: Button = null
-	for b in hud._topt:
-		if is_instance_valid(b) and str(b.get_meta("opt_group")) == "theme" \
-				and int(b.get_meta("opt_value")) == UiTheme.DARK:
-			dark_btn = b
-			break
-	if dark_btn == null:
-		print("THEMETEST FAIL no main-menu theme button")
+	var theme0 := int(SaveMgr.get_value("theme", UiTheme.LIGHT))
+	var mode0 := int(SaveMgr.get_value("gfx_mode", 1))
+
+	# 1) The palettes themselves must actually be light/dark, not two navies.
+	UiTheme.set_theme(UiTheme.LIGHT)
+	var lp := UiTheme.c("panel_bg")
+	var lt := UiTheme.c("text")
+	var light_contrast := UiTheme.contrast(lt, lp)
+	UiTheme.set_theme(UiTheme.DARK)
+	var dp := UiTheme.c("panel_bg")
+	var dt := UiTheme.c("text")
+	var dark_contrast := UiTheme.contrast(dt, dp)
+	var palette_ok: bool = lp.get_luminance() > 0.60 and dp.get_luminance() < 0.20 \
+		and light_contrast >= 4.5 and dark_contrast >= 4.5
+	print("THEMETEST palette light_lum=%.2f dark_lum=%.2f contrast=%.1f/%.1f %s" % [
+		lp.get_luminance(), dp.get_luminance(), light_contrast, dark_contrast,
+		"PASS" if palette_ok else "FAIL"])
+	if not palette_ok:
 		_quit_nicely()
 		return
+
+	# 2) Drive the real selector pills. Both the UI palette and the dedicated
+	# menu backdrop must change; the arena must not.
+	var light_btn: Button = null
+	var dark_btn: Button = null
+	for b in hud._topt:
+		if not is_instance_valid(b) or str(b.get_meta("opt_group")) != "theme":
+			continue
+		if int(b.get_meta("opt_value")) == UiTheme.LIGHT:
+			light_btn = b
+		elif int(b.get_meta("opt_value")) == UiTheme.DARK:
+			dark_btn = b
+	if light_btn == null or dark_btn == null:
+		print("THEMETEST FAIL missing main-menu theme pills")
+		_quit_nicely()
+		return
+	light_btn.emit_signal("pressed")
+	await get_tree().process_frame
+	var light_bg := menu_world.menu_bg_color()
+	var light_menu_ok: bool = not menu_world.dark and light_bg.get_luminance() > 0.60 \
+		and hud._theme_sub != null and is_instance_valid(hud._theme_sub) \
+		and hud._theme_sub.text.contains("LIGHT") \
+		and str(SaveMgr.get_value("arena", "valley")) == arena0
+	print("THEMETEST light-menu bg_lum=%.2f label=%s arena_same=%s %s" % [
+		light_bg.get_luminance(), str(hud._theme_sub.text.contains("LIGHT")),
+		str(str(SaveMgr.get_value("arena", "valley")) == arena0),
+		"PASS" if light_menu_ok else "FAIL"])
+
 	dark_btn.emit_signal("pressed")
 	await get_tree().process_frame
-	var arena_after_theme := str(SaveMgr.get_value("arena", "valley"))
-	var theme_sel_ok: bool = hud._theme_sub != null and is_instance_valid(hud._theme_sub) \
+	var dark_bg := menu_world.menu_bg_color()
+	var dark_menu_ok: bool = menu_world.dark and dark_bg.get_luminance() < 0.20 \
+		and hud._theme_sub != null and is_instance_valid(hud._theme_sub) \
 		and hud._theme_sub.text.contains("DARK")
-	print("THEMETEST theme-section dark=%s arena_same=%s label=%s %s" % [
-		str(int(SaveMgr.get_value("theme", 0)) == UiTheme.DARK),
-		str(arena_after_theme == arena0), str(theme_sel_ok),
-		"PASS" if int(SaveMgr.get_value("theme", 0)) == UiTheme.DARK \
-		and arena_after_theme == arena0 and theme_sel_ok else "FAIL"])
+	print("THEMETEST dark-menu bg_lum=%.2f label=%s %s" % [
+		dark_bg.get_luminance(), str(hud._theme_sub.text.contains("DARK")),
+		"PASS" if dark_menu_ok else "FAIL"])
+
+	# 3) Arena switch must never override the selected menu theme.
 	hud.arena_shift.emit(1)
 	await get_tree().process_frame
 	var arena1 := str(SaveMgr.get_value("arena", "valley"))
 	var arena_name := str(ArenaPresets.get_preset(arena1).get("name", ""))
 	var arena_label_ok: bool = hud._arena_label != null and is_instance_valid(hud._arena_label) \
 		and hud._arena_label.text == arena_name
-	var theme_kept: bool = int(SaveMgr.get_value("theme", 0)) == UiTheme.DARK
+	var theme_kept: bool = int(SaveMgr.get_value("theme", 0)) == UiTheme.DARK \
+		and menu_world.dark
 	print("THEMETEST arena-section arena=%s theme_same=%s label=%s %s" % [
 		arena1, str(theme_kept), str(arena_label_ok),
 		"PASS" if arena1 != arena0 and theme_kept and arena_label_ok else "FAIL"])
+
+	# 4) Theme switch must never change the arena.
+	var arena_before_theme := arena1
+	light_btn.emit_signal("pressed")
+	await get_tree().process_frame
+	var arena_after_light := str(SaveMgr.get_value("arena", "valley"))
+	dark_btn.emit_signal("pressed")
+	await get_tree().process_frame
+	var arena_after_dark := str(SaveMgr.get_value("arena", "valley"))
+	print("THEMETEST arena-independent light_same=%s dark_same=%s %s" % [
+		str(arena_after_light == arena_before_theme), str(arena_after_dark == arena_before_theme),
+		"PASS" if arena_after_light == arena_before_theme and arena_after_dark == arena_before_theme else "FAIL"])
+
 	for m in 2:
 		hud.mode_changed.emit(m)
 		await get_tree().process_frame
 		print("THEMETEST mode=%d cam_tilt_dirty=%s saved=%d" % [m, str(_topdown_dirty), int(SaveMgr.get_value("gfx_mode", 1))])
-	hud.theme_changed.emit(UiTheme.DARK)
-	await get_tree().process_frame
-	# menu state: the dedicated cinematic scene re-tints (the arena is built
-	# lazily on Play, so null is expected here)
-	print("THEMETEST dark-menu-scene=%s match_world=%s" % [
-		str(menu_world.dark), str(match_world.dark) if match_world != null else "not-built"])
-	# ...and the SAME two menu selections must drive the playable world.
+
+	# 5) Start a real match with DARK selected but a non-night arena. The
+	# arena must use its OWN palette, proving the UI theme is decoupled.
+	var arena_night := bool(ArenaPresets.get_preset(arena1).get("night", false))
 	_start_play()
-	match_world.no_death = true
+	if match_world != null:
+		match_world.no_death = true
 	await _frames(30)
-	var play_ok: bool = match_world != null and match_world.dark \
-		and match_world.arena_key == arena1 and match_world.gfx_mode == 1
-	print("THEMETEST gameplay dark=%s arena=%s mode=%d %s" % [
-		str(match_world.dark), match_world.arena_key, match_world.gfx_mode,
+	var play_ok: bool = match_world != null and match_world.arena_key == arena1 \
+		and match_world.gfx_mode == 1 and match_world.dark == arena_night \
+		and int(SaveMgr.get_value("theme", 0)) == UiTheme.DARK
+	print("THEMETEST gameplay theme=DARK arena=%s arena_night=%s world_night=%s mode=%d %s" % [
+		arena1, str(arena_night), str(match_world.dark) if match_world != null else "null",
+		match_world.gfx_mode if match_world != null else -1,
 		"PASS" if play_ok else "FAIL"])
+
 	# restore the player's choices so QA never leaves the save dirty
 	SaveMgr.set_value("arena", arena0)
 	SaveMgr.set_value("theme", theme0)
-	SaveMgr.set_value("gfx_mode", 1)
+	SaveMgr.set_value("gfx_mode", mode0)
 	_arena_key = arena0
 	_theme_id = theme0
 	hud.set_arena(arena0)
 	hud.apply_theme(theme0)
+	menu_world.set_dark(theme0 == UiTheme.DARK)
 	print("THEMETEST done — PASS")
 	_quit_nicely()
 
@@ -1190,13 +1458,16 @@ func _eat_phase(p, food, length: float, kind: int, count: int, label: String,
 		if not buried.has(i) or not claim_ms.has(i):
 			flight_ok = false
 			continue
-		var elapsed: int = int(burial_ms[i]) - int(claim_ms[i])
+		var fly: Dictionary = (made[i]["rec"] as Dictionary).get("fly", {})
+		var start_ms: int = int(fly.get("start_ms", claim_ms[i]))
+		var elapsed: int = int(burial_ms[i]) - start_ms
 		if elapsed < 80:
 			flight_ok = false
 		var slot: Dictionary = made[i]["slot"]
 		var idx: int = int(made[i]["idx"])
 		var mm: MultiMesh = slot["mm"]
-		if mm.get_instance_transform(idx).origin.y > -10.0:
+		var ty: float = mm.get_instance_transform(idx).origin.y
+		if ty > -10.0:
 			transform_ok = false
 	# After the claims the lane is clear and respawn is frozen, so any extra
 	# $10 would be exactly the double-count bug this check exists to catch.
@@ -1221,10 +1492,10 @@ func _eat_phase(p, food, length: float, kind: int, count: int, label: String,
 	var ok: bool = claimed_ok and score_ok and growth_ok \
 		and power_ok and gulp_ok and flight_ok and transform_ok and no_double \
 		and respawn_ok and court_bad == 0
-	print("EATTEST %s len=%.0f kind=%d n=%d ds=%d/%d dt=%.2f/%.2f gulp=%d/%d fly=%s double=%s respawn=%s court=%d %s" % [
+	print("EATTEST %s len=%.0f kind=%d n=%d ds=%d/%d dt=%.2f/%.2f gulp=%d/%d claim=%s fly=%s xform=%s double=%s respawn=%s court=%d %s" % [
 		label, length, kind, count, ds, want_score, dt, want_growth,
-		p.gulp_count - g0, count, str(flight_ok), str(no_double),
-		str(respawn_ok), court_bad, "PASS" if ok else "FAIL"])
+		p.gulp_count - g0, count, str(claimed_ok), str(flight_ok), str(transform_ok),
+		str(no_double), str(respawn_ok), court_bad, "PASS" if ok else "FAIL"])
 	return ok
 
 func _eat_test_run() -> void:
@@ -1376,13 +1647,21 @@ func _snap(fname: String) -> void:
 
 # ------------------------------------------------------------ scene switching
 
+## Arena preset's own night/visibility pass. Deliberately separate from the
+## main-menu Light/Dark theme so switching either axis never changes the other.
+func _arena_is_night(key: String = "") -> bool:
+	var k := key if key != "" else _arena_key
+	return bool(ArenaPresets.get_preset(k).get("night", false))
+
 ## Build the gameplay world on demand (menu boot never pays for the arena).
 func _create_match_world() -> void:
 	match_world = MatchWorld.new()
 	match_world.hud = hud
 	match_world.arena_key = _arena_key
 	match_world.gfx_mode = _gfx_mode
-	match_world.dark = _theme_id == UiTheme.DARK
+	# Arena night/visibility pass is an ARENA property, not a UI theme. The
+	# Light/Dark menu selection must never repaint the arena.
+	match_world.dark = _arena_is_night()
 	add_child(match_world)
 	hud.minimap().world = match_world   # arena radar reads the live world
 	match_world.match_event.connect(hud.push_feed)
@@ -1407,12 +1686,12 @@ func _show_game_scene() -> void:
 	elif match_world.arena_key != _arena_key:
 		# arena changed while the player was in the menu: rebuild now
 		_recreate_world()
-	elif match_world.dark != (_theme_id == UiTheme.DARK) \
+	elif match_world.dark != _arena_is_night() \
 			or match_world.gfx_mode != _gfx_mode:
-		# The menu is mode/theme-agnostic, so a selection made there must be
-		# applied to a reused world. Without this, changing THEME or VIEW on
-		# the main menu after a previous run silently played the old look.
-		match_world.restyle(_theme_id == UiTheme.DARK, _gfx_mode == 0)
+		# The menu is mode/theme-agnostic, so a VIEW change made there must be
+		# applied to a reused world. The arena's own night pass is independent
+		# of the main-menu Light/Dark theme.
+		match_world.restyle(_arena_is_night(), _gfx_mode == 0)
 	match_world.visible = true
 	match_world.process_mode = Node.PROCESS_MODE_INHERIT
 
@@ -1495,13 +1774,12 @@ func _on_arena_shift(dir: int) -> void:
 	hud.set_arena(nk)
 
 func _on_theme_changed(id: int) -> void:
-	# Dark Theme: retint the UI (HUD does that) + whichever scene is live.
+	# Main-menu/HUD theme only. The arena keeps its own preset palette; this
+	# is what makes LIGHT/DARK independent of ARENA selection.
 	_theme_id = id
 	SaveMgr.set_value("theme", id)
 	if state == State.MENU:
 		menu_world.set_dark(id == UiTheme.DARK)
-	elif match_world != null:
-		match_world.restyle(id == UiTheme.DARK, _gfx_mode == 0)
 
 func _on_mode_changed(id: int) -> void:
 	# Graphics mode: 0 = 2D top-down, 1 = 3D / 2.5D. Persisted by the HUD.

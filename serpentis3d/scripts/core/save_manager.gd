@@ -27,6 +27,7 @@ func _ready() -> void:
 	_load()
 
 func _load() -> void:
+	_migrate_legacy_desktop_save()
 	data = DEFAULTS.duplicate(true)
 	if FileAccess.file_exists(SAVE_PATH):
 		var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
@@ -49,6 +50,35 @@ func _load() -> void:
 	for k: String in DEFAULTS.keys():
 		if not data.has(k) or typeof(data[k]) != typeof(DEFAULTS[k]):
 			data[k] = DEFAULTS[k]
+
+## The display/config name changed from SERPENTIS 3D to VenomRush. Android's
+## user:// path is package-based, so phone saves are untouched. On desktop
+## Godot names the user folder after config/name; copy the old JSON forward
+## once (without deleting the old backup) so BEST/LENGTH/settings survive.
+func _migrate_legacy_desktop_save() -> void:
+	if FileAccess.file_exists(SAVE_PATH):
+		return
+	if not (OS.has_feature("windows") or OS.has_feature("macos") or OS.has_feature("linux")):
+		return
+	var user_dir := OS.get_user_data_dir()
+	if user_dir.is_empty():
+		return
+	var legacy_path := user_dir.get_base_dir().path_join("SERPENTIS 3D").path_join("save.json")
+	if not FileAccess.file_exists(legacy_path):
+		return
+	var src := FileAccess.open(legacy_path, FileAccess.READ)
+	if src == null:
+		return
+	var txt := src.get_as_text()
+	src.close()
+	var parsed = JSON.parse_string(txt)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return
+	var dst := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	if dst == null:
+		return
+	dst.store_string(txt)
+	dst.close()
 
 func save() -> void:
 	data["version"] = SAVE_VERSION
