@@ -46,6 +46,14 @@ var _minimap: ArenaMinimap = null
 var _boost_panel: PanelContainer = null
 var _menu_column: VBoxContainer = null
 var _safe_tick := -1
+# Display insets (left, top, right, bottom) in viewport pixels. The gameplay
+# HUD stays inside these; the MENU is allowed to bleed to the true screen
+# edge and only its interactive column gets the insets back.
+var _safe_insets := Vector4.ZERO
+# Base breathing margins of the menu column (before safe-area insets).
+var _menu_margin_side := 18.0
+var _menu_margin_top := 14.0
+var _menu_margin_bottom := 14.0
 # On-device perf probe (dev): tiny fps/count line revealed by perf_probe(),
 # positioned clear of the pause button, radar and joystick.
 var _perf_probe: Label = null
@@ -61,7 +69,7 @@ var _over_panel: PanelContainer
 var _over_title: Label
 var _over_lines: Label
 
-# Theme palettes live in UiTheme (LIGHT / DARK). Static role accessors keep
+# Theme palettes live in UiTheme (BEIGE / DARK). Static role accessors keep
 # external callers (match_world popups) theme-aware.
 static func role_color(role: String) -> Color:
 	return UiTheme.c(role)
@@ -69,6 +77,8 @@ static func role_color(role: String) -> Color:
 var _tl: Array = []            # [Label, role] — re-tinted on theme switch
 var _tb: Array = []            # [Button] — restyled on theme switch
 var _topt: Array = []          # option/selector buttons (settings)
+var _tsliders: Array = []      # [HSlider] — track/grabber re-tinted
+var _tchecks: Array = []       # [CheckBox] — check icons re-tinted
 var _tpanels: Array = []       # panel StyleBoxFlats
 var _tbars: Array = []         # bar background StyleBoxFlats
 var _tfills: Array = []        # [ProgressBar, role] — fill colors
@@ -495,6 +505,7 @@ func _build_menu() -> void:
 	_menu_help = null
 	_menu_logo = null
 	_menu_title = null
+	_menu_column = null
 	_play_btn = null
 	_rec_best_lab = null
 	_rec_len_lab = null
@@ -520,18 +531,19 @@ func _build_menu() -> void:
 	_rebuild_menu_scrim()
 
 	# One full-bleed page column with breathing margins from the safe area.
+	# The group itself extends past the HUD safe root for the screen edge; the
+	# interactive column below adds the display insets back.
 	_menu_column = VBoxContainer.new()
 	_menu_column.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_menu_column.add_theme_constant_override("separation", int(6 * _ui_s))
 	_menu_column.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	menu_group.add_child(_menu_column)
-	var m_side := maxf(18.0, vs.x * (0.075 if land else 0.06))
-	_menu_column.offset_left = m_side
-	_menu_column.offset_right = -m_side
-	_menu_column.offset_top = maxf(14.0, vs.y * (0.03 if land else 0.04))
+	_menu_margin_side = maxf(18.0, vs.x * (0.075 if land else 0.06))
+	_menu_margin_top = maxf(14.0, vs.y * (0.03 if land else 0.04))
 	# Negative = inset from the bottom edge. The old positive value pushed the
 	# card INTO the device safe-area/taskbar strip and left only ~8 px of air.
-	_menu_column.offset_bottom = -maxf(14.0, vs.y * (0.045 if land else 0.05))
+	_menu_margin_bottom = maxf(14.0, vs.y * (0.045 if land else 0.05))
+	_apply_menu_bleed()
 
 	# ---------------------------------------------------------- brand block
 	var brand := VBoxContainer.new()
@@ -658,12 +670,14 @@ func _build_settings_page(act: Container) -> void:
 	slider.custom_minimum_size = Vector2(0, int(34 * _ui_s))
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	slider.value_changed.connect(func(v): AudioMgr.set_master_volume(v))
+	_style_slider(slider)
 	_menu_settings.add_child(slider)
 	if not _is_touch_device():
 		var full := CheckBox.new()
 		full.text = "FULLSCREEN"
 		full.button_pressed = bool(SaveMgr.get_value("fullscreen", false))
 		_style_button(full)
+		_style_checkbox(full)
 		full.add_theme_font_size_override("font_size", int(16 * _ui_s))
 		full.pressed.connect(func():
 			var on := not bool(SaveMgr.get_value("fullscreen", false))
@@ -948,10 +962,12 @@ func _build_skins_menu(vroot: Container) -> void:
 	var amb := WorldEnvironment.new()
 	var env := Environment.new()
 	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.03, 0.05, 0.08, 1.0)
+	env.background_color = Color(0.03, 0.05, 0.08, 1.0) if UiTheme.is_dark() \
+		else Color(0.96, 0.91, 0.82, 1.0)
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.5, 0.55, 0.62)
-	env.ambient_light_energy = 1.2
+	env.ambient_light_color = Color(0.5, 0.55, 0.62) if UiTheme.is_dark() \
+		else Color(0.72, 0.64, 0.52)
+	env.ambient_light_energy = 1.2 if UiTheme.is_dark() else 0.95
 	amb.environment = env
 	_preview_env = env
 	vp.add_child(amb)
@@ -1204,6 +1220,7 @@ func _build_quit_confirm() -> void:
 	msg.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	msg.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	var yes := _menu_button(v, "YES, QUIT", func(): quit_confirmed.emit())
+	yes.set_meta("btn_role", "warn")
 	yes.add_theme_color_override("font_color", UiTheme.c("warn"))
 	_menu_button(v, "CANCEL", func(): show_quit_confirm(false))
 
@@ -1230,37 +1247,55 @@ signal quit_confirmed
 # ---------------------------------------------------------------- helpers
 
 func _apply_safe_area() -> void:
-	# Keep UI clear of notches / system bars on mobile (spec section 7):
-	# inset the HUD root by the display safe area; no-op on desktop.
+	# The gameplay HUD stays clear of notches / system bars on mobile. The menu
+	# is intentionally different: it expands past this safe root so its themed
+	# background covers the camera cutout too, and only its interactive column
+	# gets the inset back. No-op on desktop.
 	if root == null or not is_inside_tree():
 		return
 	var screen := Vector2(DisplayServer.screen_get_size())
-	if screen.x < 1.0 or screen.y < 1.0:
-		return
-	var safe: Rect2i = DisplayServer.get_display_safe_area()
-	if safe.size.x < 1 or safe.size.y < 1:
-		root.offset_left = 0
-		root.offset_top = 0
-		root.offset_right = 0
-		root.offset_bottom = 0
-		return
 	var vs := get_viewport().get_visible_rect().size
 	if vs.x < 1.0 or vs.y < 1.0:
 		return
-	var sx := vs.x / screen.x
-	var sy := vs.y / screen.y
-	var left: float = maxf(0.0, float(safe.position.x) * sx)
-	var top: float = maxf(0.0, float(safe.position.y) * sy)
-	var right: float = maxf(0.0, float(screen.x - (safe.position.x + safe.size.x)) * sx)
-	var bottom: float = maxf(0.0, float(screen.y - (safe.position.y + safe.size.y)) * sy)
+	var left := 0.0
+	var top := 0.0
+	var right := 0.0
+	var bottom := 0.0
+	if screen.x > 1.0 and screen.y > 1.0:
+		var safe: Rect2i = DisplayServer.get_display_safe_area()
+		if safe.size.x > 1 and safe.size.y > 1:
+			var sx := vs.x / screen.x
+			var sy := vs.y / screen.y
+			left = maxf(0.0, float(safe.position.x) * sx)
+			top = maxf(0.0, float(safe.position.y) * sy)
+			right = maxf(0.0, float(screen.x - (safe.position.x + safe.size.x)) * sx)
+			bottom = maxf(0.0, float(screen.y - (safe.position.y + safe.size.y)) * sy)
 	# keep insets sane: never eat more than 8% of a screen edge
-	root.offset_left = minf(left, vs.x * 0.08)
-	root.offset_top = minf(top, vs.y * 0.08)
-	root.offset_right = -minf(right, vs.x * 0.08)
-	root.offset_bottom = -minf(bottom, vs.y * 0.08)
+	_safe_insets = Vector4(minf(left, vs.x * 0.08), minf(top, vs.y * 0.08),
+		minf(right, vs.x * 0.08), minf(bottom, vs.y * 0.08))
+	root.offset_left = _safe_insets.x
+	root.offset_top = _safe_insets.y
+	root.offset_right = -_safe_insets.z
+	root.offset_bottom = -_safe_insets.w
 	_refresh_joystick_layout()
 	_ensure_menu_layout()   # portrait <-> landscape flips rebuild the page
+	_apply_menu_bleed()
 	call_deferred("_fit_menu_column")
+
+## Let the menu (especially its full-screen scrim) draw over the display
+## cutout while keeping every interactive row inside the safe viewport.
+func _apply_menu_bleed() -> void:
+	if menu_group == null or not is_instance_valid(menu_group):
+		return
+	menu_group.offset_left = -_safe_insets.x
+	menu_group.offset_top = -_safe_insets.y
+	menu_group.offset_right = _safe_insets.z
+	menu_group.offset_bottom = _safe_insets.w
+	if _menu_column != null and is_instance_valid(_menu_column):
+		_menu_column.offset_left = _menu_margin_side + _safe_insets.x
+		_menu_column.offset_top = _menu_margin_top + _safe_insets.y
+		_menu_column.offset_right = -(_menu_margin_side + _safe_insets.z)
+		_menu_column.offset_bottom = -(_menu_margin_bottom + _safe_insets.w)
 
 func _ui_scale() -> float:
 	# Menu/HUD scale. Width matters as much as height: a portrait phone must
@@ -1280,7 +1315,7 @@ func _fit_menu_column() -> void:
 	if v == null or not is_instance_valid(v):
 		return
 	var vs := get_viewport().get_visible_rect().size
-	var avail := vs.y - root.offset_top - root.offset_bottom - 8.0
+	var avail := vs.y - _safe_insets.y - _safe_insets.w - 8.0
 	var need := v.get_combined_minimum_size().y
 	v.pivot_offset = v.size * 0.5
 	var s := 1.0
@@ -1464,10 +1499,78 @@ func _add_sheen(b: Control) -> void:
 		line.offset_top = 2
 		line.offset_bottom = 3
 		b.add_child(line)
-	# Light theme: a dark hairline reads as an edge; on dark theme a white
+	# Beige theme: a dark hairline reads as an edge; on dark theme a white
 	# hairline reads as a light catch. Re-applied on every theme switch.
 	line.color = Color(0.0, 0.0, 0.0, 0.07) if not UiTheme.is_dark() \
 		else Color(1.0, 1.0, 1.0, 0.07)
+
+## Theme an HSlider so its groove/grabber never fall back to Godot's default
+## light-gray control chrome in either palette.
+func _style_slider(s: HSlider) -> void:
+	var track := StyleBoxFlat.new()
+	track.bg_color = UiTheme.c("bar_bg")
+	track.border_color = UiTheme.c("panel_edge")
+	track.set_border_width_all(1)
+	track.set_corner_radius_all(5)
+	track.content_margin_top = 5
+	track.content_margin_bottom = 5
+	var fill := StyleBoxFlat.new()
+	fill.bg_color = UiTheme.c("accent")
+	fill.set_corner_radius_all(5)
+	fill.content_margin_top = 5
+	fill.content_margin_bottom = 5
+	var grab := _slider_grabber()
+	s.add_theme_stylebox_override("slider", track)
+	s.add_theme_stylebox_override("grabber_area", fill)
+	s.add_theme_stylebox_override("grabber_area_highlight", fill)
+	s.add_theme_icon_override("grabber", grab)
+	s.add_theme_icon_override("grabber_highlight", grab)
+	if not _tsliders.has(s):
+		_tsliders.append(s)
+
+## A round accent knob with a soft edge; rebuilt on theme switches because
+## Godot HSlider grabbers are Texture2Ds, not StyleBoxFlats.
+func _slider_grabber() -> Texture2D:
+	var accent := UiTheme.c("accent")
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 0.66, 1.0])
+	g.colors = PackedColorArray([accent, accent,
+		Color(accent.r, accent.g, accent.b, 0.0)])
+	var t := GradientTexture2D.new()
+	t.gradient = g
+	t.width = 28
+	t.height = 28
+	t.fill = GradientTexture2D.FILL_RADIAL
+	t.fill_from = Vector2(0.5, 0.5)
+	t.fill_to = Vector2(1.0, 0.5)
+	return t
+
+## Theme a CheckBox (square + check + label) with the current palette icons.
+func _style_checkbox(c: CheckBox) -> void:
+	var checked := _checkbox_icon(true)
+	var unchecked := _checkbox_icon(false)
+	c.add_theme_icon_override("checked", checked)
+	c.add_theme_icon_override("checked_disabled", checked)
+	c.add_theme_icon_override("unchecked", unchecked)
+	c.add_theme_icon_override("unchecked_disabled", unchecked)
+	if not _tchecks.has(c):
+		_tchecks.append(c)
+
+func _checkbox_icon(on: bool) -> Texture2D:
+	var col := UiTheme.c("accent").to_html(false)
+	var mark := ""
+	if on:
+		mark = '<path d="M6 12 L10 16 L18 7" fill="none" stroke="#%s" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />' % col
+	var svg := '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect x="3" y="3" width="18" height="18" rx="5" fill="none" stroke="#%s" stroke-width="2"/>%s</svg>' % [col, mark]
+	var img := Image.new()
+	if img.load_svg_from_string(svg, 2.0) != OK:
+		# Remap loading is disabled in some minimal builds: a tiny solid disc is
+		# still a visible control state rather than the light default theme.
+		var fallback := Image.create(24, 24, false, Image.FORMAT_RGBA8)
+		fallback.fill(UiTheme.c("accent"))
+		img = fallback
+	img.convert(Image.FORMAT_RGBA8)
+	return ImageTexture.create_from_image(img)
 
 ## Apply a theme to EVERY themed control (menus, settings, HUD, panels,
 ## buttons, bars, popups, scrims). Called on boot and when the player switches
@@ -1483,9 +1586,12 @@ func apply_theme(id: int) -> void:
 			continue
 		var prim := bool(b.get_meta("primary"))
 		_style_button(b, prim)
-		b.add_theme_color_override("font_color", UiTheme.c("panel_bg") if prim else UiTheme.c("text"))
-		b.add_theme_color_override("font_hover_color", UiTheme.c("panel_bg") if prim else UiTheme.c("accent"))
-		b.add_theme_color_override("font_pressed_color", UiTheme.c("panel_bg") if prim else UiTheme.c("accent"))
+		var role := str(b.get_meta("btn_role", "")) if b.has_meta("btn_role") else ""
+		var font: Color = UiTheme.c(role) if role != "" else (UiTheme.c("panel_bg") if prim else UiTheme.c("text"))
+		var hover: Color = font if role != "" else (UiTheme.c("panel_bg") if prim else UiTheme.c("accent"))
+		b.add_theme_color_override("font_color", font)
+		b.add_theme_color_override("font_hover_color", hover)
+		b.add_theme_color_override("font_pressed_color", hover)
 	for sb: StyleBoxFlat in _tpanels:
 		if is_instance_valid(sb):
 			sb.bg_color = UiTheme.with_alpha("panel_bg", float(sb.get_meta("alpha", 0.7)))
@@ -1493,6 +1599,12 @@ func apply_theme(id: int) -> void:
 	for sb: StyleBoxFlat in _tbars:
 		if is_instance_valid(sb):
 			sb.bg_color = UiTheme.with_alpha("bar_bg", float(sb.get_meta("alpha", 0.9)))
+	for s: HSlider in _tsliders:
+		if is_instance_valid(s):
+			_style_slider(s)
+	for ck: CheckBox in _tchecks:
+		if is_instance_valid(ck):
+			_style_checkbox(ck)
 	for rec in _tfills:
 		var pb: ProgressBar = rec[0]
 		if is_instance_valid(pb):
@@ -1512,12 +1624,14 @@ func apply_theme(id: int) -> void:
 		_menu_title.add_theme_color_override("font_shadow_color", UiTheme.c("title_shadow"))
 	if _preview_env != null and is_instance_valid(_preview_env):
 		_preview_env.ambient_light_color = Color(0.50, 0.55, 0.62) if UiTheme.is_dark() \
-			else Color(0.70, 0.74, 0.70)
+			else Color(0.72, 0.64, 0.52)
 		_preview_env.ambient_light_energy = 1.20 if UiTheme.is_dark() else 0.95
 		_preview_env.background_color = Color(0.03, 0.05, 0.08, 1.0) if UiTheme.is_dark() \
-			else Color(0.88, 0.91, 0.87, 1.0)
+			else Color(0.96, 0.91, 0.82, 1.0)
 	if _preview_snake != null and is_instance_valid(_preview_snake):
 		_preview_snake.set_rim(0.55 if UiTheme.is_dark() else 0.12)
+	if _minimap != null and is_instance_valid(_minimap):
+		_minimap.queue_redraw()
 
 func _panel_style(alpha: float = 0.7) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()

@@ -349,18 +349,50 @@ func _dev_sequence() -> void:
 
 # ---------------------------------------------------------------- touch QA
 
+# On Windows the Godot touch emulator turns a raw `InputEventScreenTouch`
+# into a mouse button FIRST, so the synthetic desktop rig uses mouse input to
+# feed the joystick; Android keeps real multi-touch events.
+
+func _window_pos(pos: Vector2) -> Vector2:
+	# Godot's touch/mouse `InputEvent.position` for a synthetic event in the
+	# test rig is interpreted as **window coordinates**, not viewport coords.
+	# Headless/low-res windows therefore make the same logical point inflate by
+	# the content scale factor (we saw 20x). Map the caller's logical
+	# coordinates into exact window coordinates first, so the actual game sees
+	# the intended screen point on both desktop and Android.
+	var vvs: Vector2 = get_viewport().get_visible_rect().size
+	if vvs.x < 1.0 or vvs.y < 1.0 or not is_instance_valid(get_tree().root):
+		return pos
+	var w: Vector2 = Vector2(get_tree().root.size)
+	if w.x < 1.0 or w.y < 1.0:
+		return pos
+	return Vector2(pos.x * w.x / vvs.x, pos.y * w.y / vvs.y)
+
+func _pointer_event(index: int, pos: Vector2, pressed: bool) -> void:
+	var t := InputEventScreenTouch.new()
+	t.index = index
+	t.position = _window_pos(pos)
+	t.pressed = pressed
+	Input.parse_input_event(t)
+
+func _pointer_drag(index: int, pos: Vector2) -> void:
+	var d := InputEventScreenDrag.new()
+	d.index = index
+	d.position = _window_pos(pos)
+	Input.parse_input_event(d)
+
+
 func _touch_tap(index: int, pressed: bool, pos: Vector2) -> void:
-	var ev := InputEventScreenTouch.new()
-	ev.index = index
-	ev.pressed = pressed
-	ev.position = pos
-	Input.parse_input_event(ev)
+	_pointer_event(index, pos, pressed)
 
 func _touch_drag(index: int, pos: Vector2) -> void:
-	var ev := InputEventScreenDrag.new()
-	ev.index = index
-	ev.position = pos
-	Input.parse_input_event(ev)
+	_pointer_drag(index, pos)
+
+func _touch_event(index: int, pos: Vector2, pressed: bool) -> void:
+	_pointer_event(index, pos, pressed)
+
+func _drag_event(index: int, pos: Vector2) -> void:
+	_pointer_drag(index, pos)
 
 func _touch_test_run() -> void:
 	# Synthetic touch QA on desktop: verify drag-steering, dead zone and the
@@ -465,6 +497,8 @@ func _joy_test_run() -> void:
 	p._is_mobile = true   # exercise the mobile joystick path on desktop
 	p.autopilot = false   # dev autopilot would otherwise overwrite steering
 	print("JOYTEST visible=%s mobile_path=%s" % [str(joy.enabled), str(p._is_mobile)])
+	print("JOYTEST idle-hidden %s (alpha=%.2f)" % [
+		"PASS" if joy.alpha() <= 0.01 else "FAIL", joy.alpha()])
 	await get_tree().process_frame
 	# 2D top-down camera: screen-right = world +X, screen-up = world -Z
 	var dirs := {
@@ -487,11 +521,15 @@ func _joy_test_run() -> void:
 	joy.force_value(Vector2(0.05, 0.0))
 	for i in 10:
 		await get_tree().physics_frame
+	print("JOYTEST held-visible %s (alpha=%.2f)" % [
+		"PASS" if joy.active and joy.alpha() > 0.9 else "FAIL", joy.alpha()])
 	print("JOYTEST deadzone %s" % ["PASS" if joy.value == Vector2.ZERO else "FAIL"])
 	joy.force_release()
 	for i in 40:
 		await get_tree().process_frame
-	print("JOYTEST release %s (value=%s knob=%.2f)" % ["PASS" if joy.value == Vector2.ZERO else "FAIL", str(joy.value), joy._knob.length()])
+	print("JOYTEST release %s (value=%s knob=%.2f alpha=%.2f)" % [
+		"PASS" if joy.value == Vector2.ZERO and joy.alpha() <= 0.01 else "FAIL",
+		str(joy.value), joy._knob.length(), joy.alpha()])
 	await _snap("shot_joystick.png")
 	_quit_nicely()
 
@@ -734,19 +772,6 @@ func _key_event_mod(code: int, pressed: bool, shift: bool) -> void:
 	e.physical_keycode = code
 	e.shift_pressed = shift
 	e.pressed = pressed
-	Input.parse_input_event(e)
-
-func _touch_event(index: int, pos: Vector2, pressed: bool) -> void:
-	var e := InputEventScreenTouch.new()
-	e.index = index
-	e.position = pos
-	e.pressed = pressed
-	Input.parse_input_event(e)
-
-func _drag_event(index: int, pos: Vector2) -> void:
-	var e := InputEventScreenDrag.new()
-	e.index = index
-	e.position = pos
 	Input.parse_input_event(e)
 
 ## Independent screen->world derivation straight from the CAMERA basis (the
@@ -1154,12 +1179,49 @@ func _uix_test_run() -> void:
 	hud.show_quit_confirm(false)
 	await get_tree().process_frame
 	print("UIXTEST quit-cancel %s" % ["PASS" if not hud._quit_panel.visible else "FAIL"])
+	# Full-bleed menu regression: with a simulated device cutout the themed
+	# menu must still cover the whole viewport, but its interactive column must
+	# start inside the safe area. This checks the actual camera-side fix.
+	hud.show_menu(true)
+	hud._menu_page("main")
+	await get_tree().process_frame
+	var old_insets: Vector4 = hud._safe_insets
+	hud._safe_insets = Vector4(60.0, 10.0, 5.0, 20.0)
+	hud._apply_menu_bleed()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var vr := get_viewport().get_visible_rect().size
+	var menu_rect: Rect2 = hud.menu_group.get_global_rect()
+	var col_rect: Rect2 = hud._menu_column.get_global_rect()
+	var menu_covered: bool = menu_rect.position.x <= 0.01 \
+		and menu_rect.position.y <= 0.01 \
+		and menu_rect.position.x + menu_rect.size.x >= vr.x - 0.01 \
+		and menu_rect.position.y + menu_rect.size.y >= vr.y - 0.01
+	var col_right: float = hud._menu_column.offset_right
+	var col_bottom: float = hud._menu_column.offset_bottom
+	var exp_left: float = hud._menu_margin_side + 60.0
+	var exp_top: float = hud._menu_margin_top + 10.0
+	var exp_right: float = -(hud._menu_margin_side + 5.0)
+	var exp_bottom: float = -(hud._menu_margin_bottom + 20.0)
+	var column_safe: bool = hud._menu_column.offset_left >= exp_left - 0.1 \
+		and hud._menu_column.offset_top >= exp_top - 0.1 \
+		and hud._menu_column.offset_right <= exp_right + 0.1 \
+		and hud._menu_column.offset_bottom <= exp_bottom + 0.1
+	print("UIXTEST full-bleed-menu %s rect=(%.0f,%.0f)+%.0fx%.0f viewport=%.0fx%.0f" % [
+		"PASS" if menu_covered else "FAIL", menu_rect.position.x, menu_rect.position.y,
+		menu_rect.size.x, menu_rect.size.y, vr.x, vr.y])
+	print("UIXTEST safe-column %s offsets=(%.0f,%.0f,%.0f,%.0f) expected=(%.0f,%.0f,%.0f,%.0f)" % [
+		"PASS" if column_safe else "FAIL", hud._menu_column.offset_left,
+		hud._menu_column.offset_top, col_right, col_bottom,
+		exp_left, exp_top, exp_right, exp_bottom])
+	hud._safe_insets = old_insets
+	hud._apply_menu_bleed()
 	_quit_nicely()
 
 # ---------------------------------------------------------------- theme QA
 
 func _theme_test_run() -> void:
-	# LIGHT/DARK menu QA: palette truth, live switch through the REAL menu
+	# BEIGE/DARK menu QA: palette truth, live switch through the REAL menu
 	# pills, independence from ARENA, and arena night-pass independence.
 	print(UiTheme.theme_report())
 	var arena0 := str(SaveMgr.get_value("arena", "valley"))
@@ -1167,8 +1229,11 @@ func _theme_test_run() -> void:
 	var mode0 := int(SaveMgr.get_value("gfx_mode", 1))
 
 	# 1) The palettes themselves must actually be light/dark, not two navies.
+	# The beige palette must also be visibly warm (r > g > b), never pure white
+	# and never the old pale-sage panel.
 	UiTheme.set_theme(UiTheme.LIGHT)
 	var lp := UiTheme.c("panel_bg")
+	var lb := UiTheme.c("btn_bg")
 	var lt := UiTheme.c("text")
 	var light_contrast := UiTheme.contrast(lt, lp)
 	UiTheme.set_theme(UiTheme.DARK)
@@ -1176,8 +1241,10 @@ func _theme_test_run() -> void:
 	var dt := UiTheme.c("text")
 	var dark_contrast := UiTheme.contrast(dt, dp)
 	var palette_ok: bool = lp.get_luminance() > 0.60 and dp.get_luminance() < 0.20 \
-		and light_contrast >= 4.5 and dark_contrast >= 4.5
-	print("THEMETEST palette light_lum=%.2f dark_lum=%.2f contrast=%.1f/%.1f %s" % [
+		and light_contrast >= 4.5 and dark_contrast >= 4.5 \
+		and lp.r > lp.g and lp.g > lp.b and lp.b < 0.92 \
+		and lb.r > lb.g and lb.g > lb.b and lb.b < 0.96
+	print("THEMETEST palette beige_lum=%.2f dark_lum=%.2f contrast=%.1f/%.1f %s" % [
 		lp.get_luminance(), dp.get_luminance(), light_contrast, dark_contrast,
 		"PASS" if palette_ok else "FAIL"])
 	if not palette_ok:
@@ -1186,28 +1253,30 @@ func _theme_test_run() -> void:
 
 	# 2) Drive the real selector pills. Both the UI palette and the dedicated
 	# menu backdrop must change; the arena must not.
-	var light_btn: Button = null
+	var beige_name := UiTheme.theme_name(UiTheme.LIGHT)
+	var beige_btn: Button = null
 	var dark_btn: Button = null
 	for b in hud._topt:
 		if not is_instance_valid(b) or str(b.get_meta("opt_group")) != "theme":
 			continue
 		if int(b.get_meta("opt_value")) == UiTheme.LIGHT:
-			light_btn = b
+			beige_btn = b
 		elif int(b.get_meta("opt_value")) == UiTheme.DARK:
 			dark_btn = b
-	if light_btn == null or dark_btn == null:
+	if beige_btn == null or dark_btn == null:
 		print("THEMETEST FAIL missing main-menu theme pills")
 		_quit_nicely()
 		return
-	light_btn.emit_signal("pressed")
+
+	beige_btn.emit_signal("pressed")
 	await get_tree().process_frame
 	var light_bg := menu_world.menu_bg_color()
 	var light_menu_ok: bool = not menu_world.dark and light_bg.get_luminance() > 0.60 \
 		and hud._theme_sub != null and is_instance_valid(hud._theme_sub) \
-		and hud._theme_sub.text.contains("LIGHT") \
+		and hud._theme_sub.text.contains(beige_name) \
 		and str(SaveMgr.get_value("arena", "valley")) == arena0
-	print("THEMETEST light-menu bg_lum=%.2f label=%s arena_same=%s %s" % [
-		light_bg.get_luminance(), str(hud._theme_sub.text.contains("LIGHT")),
+	print("THEMETEST beige-menu bg_lum=%.2f label=%s arena_same=%s %s" % [
+		light_bg.get_luminance(), str(hud._theme_sub.text.contains(beige_name)),
 		str(str(SaveMgr.get_value("arena", "valley")) == arena0),
 		"PASS" if light_menu_ok else "FAIL"])
 
@@ -1236,15 +1305,15 @@ func _theme_test_run() -> void:
 
 	# 4) Theme switch must never change the arena.
 	var arena_before_theme := arena1
-	light_btn.emit_signal("pressed")
+	beige_btn.emit_signal("pressed")
 	await get_tree().process_frame
-	var arena_after_light := str(SaveMgr.get_value("arena", "valley"))
+	var arena_after_beige := str(SaveMgr.get_value("arena", "valley"))
 	dark_btn.emit_signal("pressed")
 	await get_tree().process_frame
 	var arena_after_dark := str(SaveMgr.get_value("arena", "valley"))
-	print("THEMETEST arena-independent light_same=%s dark_same=%s %s" % [
-		str(arena_after_light == arena_before_theme), str(arena_after_dark == arena_before_theme),
-		"PASS" if arena_after_light == arena_before_theme and arena_after_dark == arena_before_theme else "FAIL"])
+	print("THEMETEST arena-independent beige_same=%s dark_same=%s %s" % [
+		str(arena_after_beige == arena_before_theme), str(arena_after_dark == arena_before_theme),
+		"PASS" if arena_after_beige == arena_before_theme and arena_after_dark == arena_before_theme else "FAIL"])
 
 	for m in 2:
 		hud.mode_changed.emit(m)

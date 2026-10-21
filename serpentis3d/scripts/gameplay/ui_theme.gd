@@ -1,6 +1,6 @@
 class_name UiTheme
 extends RefCounted
-## VenomRush — UI palette engine (Light / Dark menu themes).
+## VenomRush — UI palette engine (Beige / Dark menu themes).
 ##
 ## Every HUD/menu color is a ROLE ("text", "accent", "panel_bg", ...) resolved
 ## through this class, so switching themes re-tints the whole interface
@@ -10,32 +10,32 @@ extends RefCounted
 ## switch never changes this theme.
 ##
 ## Both palettes are authored for WCAG-ish contrast: text >= 4.5:1 on its
-## panel, accent/gold/warn >= 3:1 on panel_bg. The light palette is a real
-## light UI (ivory cards, ink text, deep teal accent) and the dark palette is
-## the neon-on-navy night UI.
+## panel, accent/gold/warn >= 3:1 on panel_bg. The beige palette is a warm
+## cream/ivory/sand UI with espresso text and a deep teal accent; the dark
+## palette is the neon-on-navy night UI.
 
 const LIGHT := 0
 const DARK := 1
 const CLASSIC := LIGHT   # backward-compatible alias for old save/tooling code
-const NAMES := ["LIGHT", "DARK"]
+const NAMES := ["BEIGE", "DARK"]
 
 # role → color. Panels/bars carry their alpha in the value itself.
 const PALETTES := [
-	{  # 0 — LIGHT (ivory glass, ink text, deep teal accent)
-		"text": Color(0.07, 0.12, 0.16),
-		"dim": Color(0.28, 0.35, 0.39),
-		"accent": Color(0.00, 0.42, 0.36),
-		"warn": Color(0.70, 0.10, 0.16),
-		"gold": Color(0.48, 0.32, 0.00),
-		"panel_bg": Color(0.97, 0.98, 0.96),
-		"panel_edge": Color(0.00, 0.42, 0.36, 0.32),
-		"btn_bg": Color(0.995, 1.00, 0.985, 0.94),
-		"btn_border": Color(0.30, 0.44, 0.40),
-		"btn_hover_bg": Color(0.86, 0.95, 0.91, 0.98),
-		"bar_bg": Color(0.78, 0.84, 0.81, 0.92),
-		"scrim": Color(0.93, 0.96, 0.94, 0.76),
-		"menu_scrim": Color(0.97, 0.99, 0.96, 0.66),
-		"title_shadow": Color(1.0, 1.0, 1.0, 0.55),
+	{  # 0 — BEIGE (cream panels, espresso text, deep teal accent)
+		"text": Color(0.16, 0.12, 0.09),
+		"dim": Color(0.38, 0.31, 0.24),
+		"accent": Color(0.03, 0.38, 0.33),
+		"warn": Color(0.64, 0.12, 0.14),
+		"gold": Color(0.52, 0.36, 0.04),
+		"panel_bg": Color(0.96, 0.91, 0.82),
+		"panel_edge": Color(0.03, 0.38, 0.33, 0.30),
+		"btn_bg": Color(0.985, 0.955, 0.89, 0.96),
+		"btn_border": Color(0.47, 0.38, 0.27),
+		"btn_hover_bg": Color(0.92, 0.85, 0.72, 0.98),
+		"bar_bg": Color(0.82, 0.75, 0.63, 0.92),
+		"scrim": Color(0.94, 0.89, 0.80, 0.76),
+		"menu_scrim": Color(0.97, 0.93, 0.86, 0.68),
+		"title_shadow": Color(1.0, 0.97, 0.90, 0.55),
 	},
 	{  # 1 — DARK (deep space navy, high-contrast text, neon accents)
 		"text": Color(0.93, 0.96, 1.00),

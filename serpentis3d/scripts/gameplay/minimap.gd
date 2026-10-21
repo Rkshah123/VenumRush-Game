@@ -82,19 +82,19 @@ func _draw() -> void:
 		return
 	var a := 0.88 if _has_player else 0.7
 	var panel := Rect2(Vector2.ZERO, size)
-	# panel body + hairline border
+	# panel body + hairline border, both menus/HUD themed
 	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.02, 0.04, 0.07, 0.52 * a)
-	sb.border_color = Color(1, 1, 1, 0.16 * a)
+	sb.bg_color = UiTheme.with_alpha("panel_bg", 0.55 * a)
+	sb.border_color = UiTheme.with_alpha("panel_edge", 0.80 * a)
 	sb.set_border_width_all(1)
 	sb.set_corner_radius_all(int(6 * ui_scale))
 	draw_style_box(sb, panel)
 	var half := size * 0.5
 	# playable circle
-	draw_arc(half, half.x - 5.0, 0.0, TAU, 48, Color(1, 1, 1, 0.13 * a), 1.5, true)
+	draw_arc(half, half.x - 5.0, 0.0, TAU, 48, UiTheme.with_alpha("dim", 0.30 * a), 1.5, true)
 	# fruit: quiet dots (they read as "supplies", not clutter)
 	for p in _food:
-		draw_circle(_to_panel(p), maxf(1.4, 2.1 * ui_scale), Color(0.92, 1.0, 0.85, 0.45 * a))
+		draw_circle(_to_panel(p), maxf(1.4, 2.1 * ui_scale), UiTheme.with_alpha("gold", 0.55 * a))
 	# rivals
 	for e in _snakes:
 		draw_circle(_to_panel(e[0]), maxf(1.8, 2.6 * ui_scale), Color(e[1].r, e[1].g, e[1].b, 0.75 * a))
@@ -105,4 +105,4 @@ func _draw() -> void:
 		draw_circle(pp, maxf(5.0, 7.5 * ui_scale) + pulse * 2.0, Color(_player_col.r, _player_col.g, _player_col.b, 0.22 * a))
 		draw_circle(pp, maxf(3.0, 4.2 * ui_scale), Color(_player_col.r, _player_col.g, _player_col.b, 0.95 * a))
 		draw_arc(pp, maxf(5.0, 7.0 * ui_scale) + pulse * 2.5, 0.0, TAU, 24,
-			Color(1, 1, 1, 0.45 * a), 1.5, true)
+			UiTheme.with_alpha("text", 0.45 * a), 1.5, true)

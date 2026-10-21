@@ -71,19 +71,20 @@ func _build_environment() -> void:
 
 func _menu_bg() -> Color:
 	# Stage edge and environment background must be identical, otherwise the
-	# oversized plane shows a false horizon line.
-	return Color(0.010, 0.018, 0.030) if dark else Color(0.855, 0.895, 0.865)
+	# oversized plane shows a false horizon line. Beige mode is a warm cream
+	# studio; dark mode is the deep navy void.
+	return Color(0.010, 0.018, 0.030) if dark else Color(0.945, 0.910, 0.835)
 
 func menu_bg_color() -> Color:
 	return _menu_bg()
 
 func _apply_env_colors() -> void:
-	# BG_COLOR + ambient color: the cheapest atmospheric backdrop. Light mode
-	# is a pale sage studio; dark mode is a deep navy void. The stage plane's
+	# BG_COLOR + ambient color: the cheapest atmospheric backdrop. Beige mode
+	# is a warm cream studio; dark mode is a deep navy void. The stage plane's
 	# edge tone is set to this exact color in _apply_stage_colors().
 	_env.background_mode = Environment.BG_COLOR
 	_env.background_color = _menu_bg()
-	var amb_c := Color(0.15, 0.21, 0.30) if dark else Color(0.66, 0.72, 0.67)
+	var amb_c := Color(0.15, 0.21, 0.30) if dark else Color(0.70, 0.62, 0.50)
 	_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	_env.ambient_light_color = amb_c
 	_env.ambient_light_energy = 0.38 if dark else 0.62
@@ -97,11 +98,11 @@ func _apply_env_colors() -> void:
 
 func _apply_light_colors() -> void:
 	if _sun != null:
-		_sun.light_energy = 1.30 if dark else 1.42
-		_sun.light_color = Color(0.82, 0.92, 1.0) if dark else Color(1.0, 0.96, 0.87)
+		_sun.light_energy = 1.30 if dark else 1.34
+		_sun.light_color = Color(0.82, 0.92, 1.0) if dark else Color(1.0, 0.93, 0.80)
 	if _fill != null:
-		_fill.light_energy = 0.22 if dark else 0.30
-		_fill.light_color = Color(0.35, 0.55, 0.75) if dark else Color(0.58, 0.72, 0.86)
+		_fill.light_energy = 0.22 if dark else 0.28
+		_fill.light_color = Color(0.35, 0.55, 0.75) if dark else Color(0.60, 0.72, 0.78)
 
 func set_dark(v: bool) -> void:
 	dark = v
@@ -157,13 +158,13 @@ func _apply_stage_colors() -> void:
 		_stage_mat.set_shader_parameter(&"u_b", Color(0.018, 0.052, 0.058))
 		_stage_mat.set_shader_parameter(&"u_glow", Color(0.16, 0.85, 0.72))
 	else:
-		_stage_mat.set_shader_parameter(&"u_b", Color(0.905, 0.945, 0.895))
-		_stage_mat.set_shader_parameter(&"u_glow", Color(0.22, 0.78, 0.64))
+		_stage_mat.set_shader_parameter(&"u_b", Color(0.965, 0.925, 0.845))
+		_stage_mat.set_shader_parameter(&"u_glow", Color(0.18, 0.62, 0.50))
 
 func _apply_disc_color() -> void:
 	if _disc_mat != null:
 		_disc_mat.albedo_color = Color(0.02, 0.032, 0.044, 0.80) if dark \
-			else Color(0.46, 0.58, 0.50, 0.30)
+			else Color(0.38, 0.30, 0.20, 0.24)
 
 # ---------------------------------------------------------------- ambience
 
@@ -305,9 +306,9 @@ func _build_snakes() -> void:
 func _dim_snake(s: Snake) -> void:
 	var m := s.get_body_material()
 	if m != null:
-		# Far silhouettes: darker than the light stage, lighter than the dark
+		# Far silhouettes: darker than the beige stage, lighter than the dark
 		# stage, so depth reads in BOTH menu themes without swallowing detail.
-		var to_dark := Color(0.13, 0.20, 0.27) if dark else Color(0.32, 0.40, 0.43)
+		var to_dark := Color(0.13, 0.20, 0.27) if dark else Color(0.38, 0.32, 0.24)
 		m.set_shader_parameter(&"u_dorsal", to_dark)
 		m.set_shader_parameter(&"u_accent", to_dark.lightened(0.10))
 		m.set_shader_parameter(&"u_belly", to_dark.lightened(0.06))
