@@ -13,6 +13,7 @@ render_mode cull_disabled, diffuse_lambert, specular_schlick_ggx;
 // 2 light blotches, 3 viper zigzag, 4 accent stripes).
 
 uniform sampler2D u_spine : filter_linear, repeat_disable;
+uniform sampler2D u_tan : filter_linear, repeat_disable; // per-station CPU-smoothed tangent
 uniform float u_texel = 0.0026041667; // 1 / RING_COUNT (keep in sync with GDScript)
 uniform float u_rings = 384.0;
 uniform float u_ds = 0.026;           // meters per station (updated per frame)
@@ -30,6 +31,8 @@ uniform float u_motion = 1.0;         // 0..1.3 — movement energy
 uniform float u_glow = 0.0;
 uniform float u_rim = 0.0;             // fresnel edge light — keeps snakes
                                       // readable on dark arenas (theme pass)
+uniform float u_bank = 0.0;           // progressive bank: ring roll = u_bank · t
+                                      // (head upright → tail rolled into turns)
 uniform float u_dbg = 0.0;            // dev: flat ribbon diagnostic (bypasses spine texture)
 
 varying vec3 v_axis;
@@ -58,15 +61,35 @@ void vertex() {
 
 		vec4 A = texture(u_spine, vec2(t0, 0.5));
 		vec4 B = texture(u_spine, vec2(t1, 0.5));
-		vec4 P0 = texture(u_spine, vec2(tp, 0.5));
 
 		vec3 P = mix(A.xyz, B.xyz, f);
 		float r = mix(A.w, B.w, f);
 
-		vec3 D = normalize(B.xyz - P0.xyz + vec3(0.0001, 0.0, 0.0));
+		// Ring frame baked on the CPU: a windowed tangent (the SAME window
+		// that drives the lateral sway) uploaded per station, so the tube's
+		// orientation and its sway can never disagree and the frame can never
+		// flip between neighbour stations. Deriving D per-vertex from 1-texel
+		// spine deltas was the root cause of bodies hopping onto their own
+		// backs in tight turns.
+		vec3 D = normalize(mix(
+			texture(u_tan, vec2(t0, 0.5)).xyz,
+			texture(u_tan, vec2(t1, 0.5)).xyz, f) + vec3(0.0, 0.0, 0.0001));
 		v_axis = D;
 		vec3 S = normalize(cross(vec3(0.0, 1.0, 0.0), D));
 		vec3 U = cross(D, S);
+
+		// Progressive bank: rings roll gradually along the body (head upright,
+		// tail leaned into the corner). One small roll PER RING can never
+		// lever distant stations the way a whole-mesh rotation about the head
+		// used to — the tube stays glued to its spine through every turn.
+		float t01 = st / max(u_rings - 1.0, 1.0);
+		float roll = u_bank * t01;
+		float crc = cos(roll);
+		float src = sin(roll);
+		vec3 S2 = S * crc + U * src;
+		vec3 U2 = U * crc - S * src;
+		S = S2;
+		U = U2;
 
 		// Slightly flattened cross-section (real snake bodies are not perfect cylinders)
 		VERTEX = P + S * cs * r + U * sn * r * 0.86;

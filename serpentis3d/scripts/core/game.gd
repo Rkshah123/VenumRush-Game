@@ -47,6 +47,9 @@ var _eat_test := false
 var _skins_test := false
 var _body_test := false
 var _villain_test := false
+var _turn_test := false
+var _tap_test := false
+var _turn_probe := 0
 var _skin_dev := -1
 var _diag_t := 0.0
 
@@ -113,6 +116,13 @@ func _ready() -> void:
 		if a == "--villain-test":
 			_autoplay = true
 			_villain_test = true
+		if a == "--turn-test":
+			_autoplay = true
+			_turn_test = true
+			_no_death_dev = true
+		if a == "--tap-test":
+			_autoplay = true
+			_tap_test = true
 		if a == "--theme-test":
 			_autoplay = true
 			_theme_test = true
@@ -196,7 +206,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--eat-test", "--skins-test", "--body-test", "--villain-test", "--theme-test", "--uix-test", "--mode-test", "--joystick", "--joy-test", "--dir-test", "--ctrl-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--eat-test", "--skins-test", "--body-test", "--villain-test", "--turn-test", "--tap-test", "--theme-test", "--uix-test", "--mode-test", "--joystick", "--joy-test", "--dir-test", "--ctrl-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -309,6 +319,12 @@ func _dev_sequence() -> void:
 		return
 	if _villain_test:
 		await _villain_test_run()
+		return
+	if _turn_test:
+		await _turn_test_run()
+		return
+	if _tap_test:
+		await _tap_test_run()
 		return
 	if _uix_test:
 		await _uix_test_run()
@@ -447,7 +463,7 @@ func _touch_test_run() -> void:
 
 func _skins_test_run() -> void:
 	# stays in the MENU: page switch, live preview render, unlock gates, persistence
-	print("SKINTEST count %s" % ("PASS" if SkinCatalog.count() == 8 else "FAIL"))
+	print("SKINTEST count %s" % ("PASS" if SkinCatalog.count() >= 11 else "FAIL"))
 	print("SKINTEST unlock0 %s" % ("PASS" if SkinCatalog.unlocked(0, 0) else "FAIL"))
 	print("SKINTEST lock5 %s" % ("PASS" if not SkinCatalog.unlocked(5, 600) else "FAIL"))
 	print("SKINTEST clamp %s" % ("PASS" if SkinCatalog.get_skin(99).has("name") and SkinCatalog.get_skin(-2).has("name") else "FAIL"))
@@ -628,7 +644,7 @@ func _body_test_run() -> void:
 			p.desired_dir = fwd.rotated(Vector3.UP, turns[ti])
 			await _frames(18)
 			var m := _body_metrics(p)
-			var ok: bool = m["max_err"] < 0.30 and m["y_span"] < 0.01 \
+			var ok: bool = m["max_err"] < 0.02 and m["y_span"] < 0.01 \
 				and m["hist_len"] + 0.01 >= p.length and m["head_xz"] < 0.001 \
 				and m["root_y"] == 0.0 and m["lift"] > 0.20
 			if not ok:
@@ -636,6 +652,33 @@ func _body_test_run() -> void:
 			print("BODYTEST mode=%d turn=%d gap=%.3f..%.3f err=%.3f yspan=%.4f hist=%.1f/%.1f lift=%.2f %s" % [
 				mode, ti, m["min_gap"], m["max_gap"], m["max_err"], m["y_span"],
 				m["hist_len"], p.length, m["lift"], "PASS" if ok else "FAIL"])
+	# Turn-continuity: between consecutive physics frames during a hard turn,
+	# no body station may move more than the head's own travel (+ tube-roll
+	# noise). The old whole-mesh bank levered far-away stations by metres the
+	# moment a turn started or ended — the classic mid-turn "pop".
+	p.desired_dir = Vector3(sin(p.heading), 0, cos(p.heading)).rotated(Vector3.UP, PI)
+	await get_tree().physics_frame
+	var snap_a := {}
+	for s in match_world.snakes:
+		if is_instance_valid(s) and s.alive and s._raw.size() == Snake.RING_COUNT:
+			snap_a[s.id] = (s._raw.duplicate())
+	await get_tree().physics_frame
+	var pop := 0.0
+	var pop_who := ""
+	for s in match_world.snakes:
+		if is_instance_valid(s) and s.alive and snap_a.has(s.id) and s._raw.size() == Snake.RING_COUNT:
+			var arr: PackedVector3Array = snap_a[s.id]
+			var travel: float = s.speed_cur / 60.0 + 0.03
+			for i in Snake.RING_COUNT:
+				var d := arr[i].distance_to(s._raw[i]) - travel
+				if d > pop:
+					pop = d
+					pop_who = s.name
+	var pop_ok: bool = pop < 0.05
+	print("BODYTEST continuity worst=%s pop=%.4f %s" % [
+		pop_who, pop, "PASS" if pop_ok else "FAIL"])
+	if not pop_ok:
+		fail += 1
 	# Frame-rate independence: the exact arc-length history must produce the
 	# same station spacing at 30 Hz and 90 Hz (the old code did not).
 	var fps_err: Array[float] = []
@@ -647,7 +690,7 @@ func _body_test_run() -> void:
 		await _frames(30 if hz == 30 else 90)
 		var m2 := _body_metrics(p)
 		fps_err.append(float(m2["max_err"]))
-		var ok2: bool = m2["max_err"] < 0.30 and m2["y_span"] < 0.01
+		var ok2: bool = m2["max_err"] < 0.02 and m2["y_span"] < 0.01
 		if not ok2:
 			fail += 1
 		print("BODYTEST fps=%d gap_err=%.3f yspan=%.4f %s" % [
@@ -661,6 +704,245 @@ func _body_test_run() -> void:
 		"PASS" if fps_ok else "FAIL"])
 	print("BODYTEST done — %s" % ("PASS" if fail == 0 else "FAIL"))
 	_quit_nicely()
+
+# ---------------------------------------------------------------- turning QA
+
+## Turning-quality QA for EVERY snake (spec item 8): the tube ring frame must
+## never flip (the "snake hops onto its own back" bug), body stations must
+## stay near the recorded path in the tightest scripted S/U-turn barrage,
+## half-rate serpents must keep root + head anchored every tick, and in 2D
+## top-down mode the whole-body roll must stay 0 (the "squash + pop" bug)
+## while banking measurably continues in 3D.
+func _turn_test_run() -> void:
+	print("TURNTEST start — hard-turn barrage on the full roster")
+	match_world.no_death = true
+	# Deterministic starting mode: this harness must measure banking in 3D
+	# phase 1 regardless of the mode a previous test saved.
+	hud.mode_changed.emit(1)
+	await _frames(8)
+	var worst := {"flip_min": 2.0, "path_off": 0.0, "lag_ratio": 0.0, "roll3": 0.0, "roll2": 0.0, "tan_size": 1 << 20, "zero_norm": 0}
+	_turn_probe = 1
+	# ---- phase 1: 3D — alternating ±99° jinks and full 180° reversals ----
+	for cycle in 4:
+		var target := float(cycle) * (99.0 if cycle % 2 == 0 else -99.0) * PI / 180.0
+		for s in match_world.snakes:
+			if is_instance_valid(s) and s.alive:
+				s.hold_heading = target
+		for t in 36:
+			await get_tree().physics_frame
+			if t % 6 != 0:
+				continue
+			for s in match_world.snakes:
+				if is_instance_valid(s) and s.alive:
+					_turn_sample(s, worst)
+	# 180° hard reversal, held long enough for the whole body to swing through
+	var p: PlayerSnake = match_world.player
+	if p != null:
+		p.hold_heading = p.heading + PI
+	for t in 30:
+		await get_tree().physics_frame
+		if t % 6 != 0:
+			continue
+		for s in match_world.snakes:
+			if is_instance_valid(s) and s.alive:
+				_turn_sample(s, worst)
+	# ---- phase 2: 2D — same barrage, body roll must stay zero ----
+	hud.mode_changed.emit(0)
+	await _frames(8)
+	for cycle in 3:
+		var target2 := float(cycle) * (110.0 if cycle % 2 == 0 else -110.0) * PI / 180.0
+		for s in match_world.snakes:
+			if is_instance_valid(s) and s.alive:
+				s.hold_heading = target2
+		for t2 in 36:
+			await get_tree().physics_frame
+			if t2 % 6 != 0:
+				continue
+			for s in match_world.snakes:
+				if is_instance_valid(s) and s.alive:
+					_turn_sample(s, worst)
+	print("TURNTEST diag flip_min=%.4f tan_size_min=%d zero_norm_max=%d" % [
+		float(worst["flip_min"]), int(worst["tan_size"]), int(worst["zero_norm"])])
+	print("TURNTEST frame-flip min_dot=%.4f %s" % [worst["flip_min"],
+		"PASS" if float(worst["flip_min"]) > 0.5 else "FAIL"])
+	print("TURNTEST path-offset max=%.3f %s" % [worst["path_off"],
+		"PASS" if float(worst["path_off"]) < 0.85 else "FAIL"])
+	print("TURNTEST root-lag ratio=%.3f %s" % [worst["lag_ratio"],
+		"PASS" if float(worst["lag_ratio"]) < 1.0 else "FAIL"])
+	print("TURNTEST bank roll 3D=%.3f 2D=%.4f %s" % [worst["roll3"], worst["roll2"],
+		"PASS" if float(worst["roll2"]) < 0.002 and float(worst["roll3"]) > 0.02 else "FAIL"])
+	var ok_turn: bool = float(worst["flip_min"]) > 0.5 and float(worst["path_off"]) < 0.85 \
+		and float(worst["lag_ratio"]) < 1.0 and float(worst["roll2"]) < 0.002 \
+		and float(worst["roll3"]) > 0.02
+	print("TURNTEST done — %s" % ("PASS" if ok_turn else "FAIL"))
+	hud.mode_changed.emit(1)  # leave the session in the default 3D mode for saves
+	await _frames(4)
+	_quit_nicely()
+
+func _tap_test_run() -> void:
+	# Settings-page option-pill QA. Headless cannot deliver synthetic GUI
+	# events to Buttons (verified: parse_input_event + flush_buffered_events
+	# and Window.push_input both no-op in the headless DisplayServer), so this
+	# harness checks the widget layer structurally and the press handlers:
+	#  1) the deepest visible control at each pill center must be that pill
+	#     (nothing overlays or occludes it);
+	#  2) emitting `pressed` must flip the saved value (handler wiring intact);
+	#  3) BACK must really swap to the main page.
+	# Desktop QA save values are restored afterwards. Real-finger behaviour was
+	# verified separately on device (2026-10-23): SOUND/BACK/DARK/PLAY taps all
+	# landed; an earlier "dead pill" report was tap-coordinate misreading, not
+	# a code defect.
+	hud.show_menu(true)
+	hud._menu_page("settings")
+	await get_tree().process_frame
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var gfx: Button = _find_opt("gfx_mode", 0)
+	var them: Button = _find_opt("theme", 0)
+	var mute: Button = _find_opt("muted", 1)
+	var failed := 0
+	var g_before := int(SaveMgr.get_value("gfx_mode", 1))
+	var t_before := int(SaveMgr.get_value("theme", 0))
+	var m_before := int(SaveMgr.get_value("muted", 0))
+	for pair in [[gfx, "gfx 2D pill", "gfx_mode", 0], [them, "theme BEIGE pill", "theme", 0], [mute, "sound OFF pill", "muted", 1]]:
+		var b: Button = pair[0]
+		if b == null or not b.is_visible_in_tree():
+			print("TAPTEST %s missing/invisible FAIL" % pair[1])
+			failed += 1
+			continue
+		var c: Vector2 = b.get_global_rect().get_center()
+		var deep: Control = _cover_top(c)
+		if deep != b:
+			print("TAPTEST %s covered by %s FAIL" % [pair[1], str(deep.get_class()) if deep != null else "nothing"])
+			failed += 1
+			continue
+		b.pressed.emit()
+		await get_tree().process_frame
+		var got: int = int(SaveMgr.get_value(pair[2], -99))
+		var ok: bool = got == int(pair[3])
+		print("TAPTEST %s center=(%.0f,%.0f) save=%d %s" % [pair[1], c.x, c.y, got, "PASS" if ok else "FAIL"])
+		if not ok:
+			failed += 1
+	var back: Button = null
+	for c2 in hud._menu_settings.get_children():
+		if c2 is Button and (c2 as Button).text == "BACK":
+			back = c2
+	if back == null or not back.is_visible_in_tree():
+		print("TAPTEST back missing FAIL")
+		failed += 1
+	else:
+		back.pressed.emit()
+		await get_tree().process_frame
+		var page_ok: bool = hud.current_page() == "main"
+		print("TAPTEST back press %s" % ("PASS" if page_ok else "FAIL"))
+		if not page_ok:
+			failed += 1
+	SaveMgr.set_value("gfx_mode", g_before)
+	SaveMgr.set_value("theme", t_before)
+	SaveMgr.set_value("muted", m_before)
+	print("TAPTEST done — %s" % ("PASS" if failed == 0 else "FAIL %d" % failed))
+	_quit_nicely()
+
+func _find_opt(group: String, value: int) -> Button:
+	for b in hud._topt:
+		if is_instance_valid(b) and str(b.get_meta("opt_group")) == group \
+				and int(b.get_meta("opt_value")) == value and b.is_visible_in_tree():
+			return b
+	return null
+
+## Deepest visible Control whose global rect contains `pos`, walking down from
+## the menu tree — validates that a pill is the top-most interactive control
+## at its own center (nothing overlays or occludes it).
+func _cover_top(pos: Vector2, node: Node = null) -> Control:
+	if node == null:
+		node = hud.menu_group
+	var deep: Control = null
+	for c in node.get_children():
+		if c is Control:
+			var ctl := c as Control
+			if not ctl.is_visible_in_tree() or not ctl.get_global_rect().has_point(pos):
+				continue
+			var sub := _cover_top(pos, ctl)
+			deep = sub if sub != null else ctl
+	return deep
+## Per-snake turn-quality sample: shortest consecutive-ring-tangent dot
+## (ring-frame continuity), plus a one-shot probe dump of raw `_tan` values
+## so zeroed slots are distinguishable from genuine flips.
+func _turn_sample(s: Snake, acc: Dictionary) -> void:
+	var tan: PackedFloat32Array = s._tan
+	acc["tan_size"] = mini(int(acc["tan_size"]), tan.size())
+	var zero_norm := 0
+	for i in Snake.RING_COUNT:
+		var j := i * 4
+		if tan[j] * tan[j] + tan[j + 2] * tan[j + 2] < 0.25:
+			zero_norm += 1
+	acc["zero_norm"] = maxi(int(acc["zero_norm"]), zero_norm)
+	for i in Snake.RING_COUNT - 1:
+		var a := i * 4
+		var b := a + 4
+		var d: float = tan[a] * tan[b] + tan[a + 2] * tan[b + 2]
+		acc["flip_min"] = minf(float(acc["flip_min"]), d)
+		if d < 0.5 and int(acc.get("dumped", 0)) == 0:
+			acc["dumped"] = 1
+			print("TURNTEST badpair %s i=%d norms=(%.3f,%.3f) tanA=(%.3f,%.3f) tanB=(%.3f,%.3f)" % [
+				s.name, i,
+				sqrt(tan[a] * tan[a] + tan[a + 2] * tan[a + 2]),
+				sqrt(tan[b] * tan[b] + tan[b + 2] * tan[b + 2]),
+				tan[a], tan[a + 2], tan[b], tan[b + 2]])
+	acc["path_off"] = maxf(float(acc["path_off"]), _turn_path_offset(s))
+	var step_bound: float = s.speed_cur / 60.0 + 0.03
+	acc["lag_ratio"] = maxf(float(acc["lag_ratio"]),
+		(s.global_position - s.head_pos).length() / maxf(step_bound, 0.02))
+	# Bank moved INTO the ring frame (u_bank · t progressive ring roll). The
+	# old body_mi.rotation.z levered stations by their distance from the head
+	# and made long tails whip sideways on turn start/end; the quantity
+	# measured here is the peak roll a ring can reach.
+	if s._mat != null:
+		var ub: float = absf(float(s._mat.get_shader_parameter(&"u_bank")))
+		if match_world.gfx_mode == 1:
+			acc["roll3"] = maxf(float(acc["roll3"]), ub)
+		else:
+			acc["roll2"] = maxf(float(acc["roll2"]), ub)
+	if _turn_probe > 0:
+		_turn_probe -= 1
+		var r := Snake.RING_COUNT * 4 - 4
+		print("TURNTEST probe %s tan_size=%d head=(%.2f,%.2f) next=(%.2f,%.2f) mid=(%.2f,%.2f) tailp2=(%.2f,%.2f) tail=(%.2f,%.2f)" % [
+			s.name, tan.size(), tan[0], tan[2], tan[4], tan[6],
+			tan[768], tan[770], tan[r - 4], tan[r - 2], tan[r], tan[r + 2]])
+
+## Furthest lateral (XZ) distance of any sampled body station from the
+## recorded head-path polyline. The sway rides ~0.5 m at most; a station far
+## beyond that means the tube has crawled off its own swept path.
+func _turn_path_offset(s: Snake) -> float:
+	var hist_n: int = s._hist_count
+	if hist_n < 8:
+		return 0.0
+	var root := s.global_position
+	var worst := 0.0
+	for o in range(0, Snake.RING_COUNT, 24):
+		var w: Vector3 = root + Vector3(s._spine[o], s._spine[o + 1], s._spine[o + 2])
+		var steps := 8
+		var best := 999.0
+		while steps <= hist_n + 6:
+			var a: Vector3 = s._hist_at(mini(steps, hist_n - 1))
+			var b: Vector3 = s._hist_at(mini(steps + 8, hist_n - 1))
+			best = minf(best, _seg_dist_xz(w, a, b))
+			steps += 8
+		worst = maxf(worst, best)
+	return worst
+
+func _seg_dist_xz(p: Vector3, a: Vector3, b: Vector3) -> float:
+	var asx := p.x - a.x
+	var asz := p.z - a.z
+	var bsx := b.x - a.x
+	var bsz := b.z - a.z
+	var denom := bsx * bsx + bsz * bsz
+	var t := 0.0
+	if denom > 0.000001:
+		t = clampf((asx * bsx + asz * bsz) / denom, 0.0, 1.0)
+	var dx := asx - bsx * t
+	var dz := asz - bsz * t
+	return sqrt(dx * dx + dz * dz)
 
 # ---------------------------------------------------------------- villain QA
 
@@ -1185,20 +1467,15 @@ func _uix_test_run() -> void:
 	hud.show_menu(true)
 	hud._menu_page("main")
 	await get_tree().process_frame
+	# Structural check first, deterministically: read the column offsets in the
+	# same frame the fake insets are applied. Waiting before the read lets a
+	# stray headless size_changed event call _apply_safe_area() (zero insets in
+	# headless) in-between — an event-pump race of the test rig, not of the
+	# menu (a late real-insets application re-applies the bleed correctly on
+	# device).
 	var old_insets: Vector4 = hud._safe_insets
 	hud._safe_insets = Vector4(60.0, 10.0, 5.0, 20.0)
 	hud._apply_menu_bleed()
-	await get_tree().process_frame
-	await get_tree().process_frame
-	var vr := get_viewport().get_visible_rect().size
-	var menu_rect: Rect2 = hud.menu_group.get_global_rect()
-	var col_rect: Rect2 = hud._menu_column.get_global_rect()
-	var menu_covered: bool = menu_rect.position.x <= 0.01 \
-		and menu_rect.position.y <= 0.01 \
-		and menu_rect.position.x + menu_rect.size.x >= vr.x - 0.01 \
-		and menu_rect.position.y + menu_rect.size.y >= vr.y - 0.01
-	var col_right: float = hud._menu_column.offset_right
-	var col_bottom: float = hud._menu_column.offset_bottom
 	var exp_left: float = hud._menu_margin_side + 60.0
 	var exp_top: float = hud._menu_margin_top + 10.0
 	var exp_right: float = -(hud._menu_margin_side + 5.0)
@@ -1207,13 +1484,22 @@ func _uix_test_run() -> void:
 		and hud._menu_column.offset_top >= exp_top - 0.1 \
 		and hud._menu_column.offset_right <= exp_right + 0.1 \
 		and hud._menu_column.offset_bottom <= exp_bottom + 0.1
+	print("UIXTEST safe-column %s offsets=(%.0f,%.0f,%.0f,%.0f) expected=(%.0f,%.0f,%.0f,%.0f)" % [
+		"PASS" if column_safe else "FAIL", hud._menu_column.offset_left,
+		hud._menu_column.offset_top, hud._menu_column.offset_right, hud._menu_column.offset_bottom,
+		exp_left, exp_top, exp_right, exp_bottom])
+	hud._apply_menu_bleed()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var vr := get_viewport().get_visible_rect().size
+	var menu_rect: Rect2 = hud.menu_group.get_global_rect()
+	var menu_covered: bool = menu_rect.position.x <= 0.01 \
+		and menu_rect.position.y <= 0.01 \
+		and menu_rect.position.x + menu_rect.size.x >= vr.x - 0.01 \
+		and menu_rect.position.y + menu_rect.size.y >= vr.y - 0.01
 	print("UIXTEST full-bleed-menu %s rect=(%.0f,%.0f)+%.0fx%.0f viewport=%.0fx%.0f" % [
 		"PASS" if menu_covered else "FAIL", menu_rect.position.x, menu_rect.position.y,
 		menu_rect.size.x, menu_rect.size.y, vr.x, vr.y])
-	print("UIXTEST safe-column %s offsets=(%.0f,%.0f,%.0f,%.0f) expected=(%.0f,%.0f,%.0f,%.0f)" % [
-		"PASS" if column_safe else "FAIL", hud._menu_column.offset_left,
-		hud._menu_column.offset_top, col_right, col_bottom,
-		exp_left, exp_top, exp_right, exp_bottom])
 	hud._safe_insets = old_insets
 	hud._apply_menu_bleed()
 	_quit_nicely()

@@ -1,77 +1,198 @@
 class_name FoodSpawner
 extends Node3D
-## Collectible REAL FRUITS (basic / rare / golden) + power orbs + fallen-snake
-## drops (spec §5). Each kind may have SEVERAL real-food variants (apple /
-## strawberry / watermelon for basic; cherries for rare; lemon / banana for
-## golden) chosen RANDOMLY per spawn so the court always shows variety.
-## All variants render through SHARED per-variant MultiMeshes (a handful of
-## draw calls total) with per-slot transforms updated in _process (bob +
-## sway) — cheap on integrated GPUs regardless of fruit count.
+## Collectible REAL FOOD (basic / rare / golden) + power orbs + fallen-snake
+## drops (spec §5). Each kind carries SEVERAL real-food variants chosen randomly
+## per spawn (fruits AND snack foods: apple / burger / sushi / donut …), so the
+## court always shows variety while every kind keeps its score/growth identity.
+## All variants render through SHARED per-variant MultiMeshes (one draw call
+## each) with per-slot transforms updated in _process — cheap on any device.
 ##
-## Eating animation (spec §4): the eaten fruit FLYS INTO the snake's mouth
-## (short eased flight + shrink + spin), then the sparkle burst pops where the
-## fruit disappeared. Growth/score stay handled by MatchWorld (counted once).
+## 3D mode renders the textured low-poly models; 2D top-down mode renders the
+## matching polished flat-sprite ICON of the same food (a dedicated unshaded
+## ground-aligned quad — crisp, always readable, no artificial tint).
+##
+## Eating animation (spec §4): the eaten food FLYS INTO the snake's mouth
+## (eased flight + spin + smooth shrink), then a sparkle burst pops where the
+## bite landed. Growth/score stay handled by MatchWorld (counted once).
 
-const KIND_TARGETS := [40, 6, 2, 2]
+const KIND_TARGETS := [100, 10, 6, 3]
+const KIND_TARGETS_MOBILE := [64, 7, 4, 2]
 const KIND_GROWTH := [0.5, 0.95, 1.4, 0.4]
 const KIND_SCORE := [10, 30, 75, 15]
 const KIND_COLORS := [Color(0.92, 0.16, 0.12), Color(0.55, 0.25, 0.75), Color(1.0, 0.78, 0.25), Color(0.42, 0.92, 1.0)]
 const KIND_RADIUS := [0.3, 0.34, 0.4, 0.35]
-# absolute fruit budget - death drops respect this cap. Phones keep a leaner
-# court (see _ready): fewer alive orbs means smaller eat-check, hash and
-# MultiMesh work every tick, and density past ~110 was never surface-visible
-const HARD_CAP := 178
+
+# absolute food budget — death drops respect this cap. Phones keep a leaner
+# court (see _ready): fewer alive orbs means a smaller eat-check/hash and
+# MultiMesh churn every tick. 200 ≈ targets (119) + massed death drops.
+const HARD_CAP := 200
+const MOBILE_HARD_CAP := 132
 const FRUIT_TILT := 0.60  # ~34° camera-facing lean: silhouette readable top-down
 const BOB_BASE := [0.34, 0.34, 0.34, 0.52]
 const BOB_AMP := [0.07, 0.07, 0.07, 0.13]
 const BOB_SPD := [2.0, 2.0, 2.0, 3.4]
-const FLY_TIME := 0.13  # min seconds of the eat-flight into the mouth
-const FLY_TIME_MAX := 0.5
-const SPAWN_EDGE := 4.5   # keep fruit comfortably inside the death barrier
-const FRUIT_GAP := 0.9    # minimum centre distance between two fruits
-var _bob_frame := 0     # transform-refresh counter for the throttled bob pass
+const FLY_TIME := 0.18  # min seconds of the eat-flight into the mouth
+const FLY_TIME_MAX := 0.55
+const SPAWN_EDGE := 4.5   # keep food comfortably inside the death barrier
+const FRUIT_GAP := 1.05   # minimum centre distance between two foods
+var _bob_frame := 0       # transform-refresh counter for the throttled bob pass
 
-# Variant table per kind. For real foods: path + pool capacity + spawn weight
-# + normalized height + emissive boost. Named surfaces ("surface_map") get
-# dedicated colors; everything else is tinted with the kind color so the
-# gameplay color coding stays readable at distance (spec §5).
+# Natural per-surface colors for the models that ship flat colors. Named
+# surfaces get a dedicated color; unmapped surfaces of "tint" variants keep the
+# kind color coding, unmapped "keep" surfaces reuse the model's own material.
 const SURFACE_COLORS := {
 	"rind_green": Color(0.11, 0.44, 0.15),
 	"rind_lime": Color(0.60, 0.77, 0.35),
 	"seed_dark": Color(0.03, 0.03, 0.03),
 	"fruit_inner": Color(0.95, 0.87, 0.55),
 	"spore_light": Color(0.92, 0.90, 0.84),
+	# --- burger ---
+	"bun": Color(0.89, 0.62, 0.24),
+	"bun_top": Color(0.96, 0.74, 0.34),
+	"patty": Color(0.44, 0.22, 0.08),
+	"cheese": Color(0.97, 0.71, 0.10),
+	"lettuce": Color(0.28, 0.56, 0.09),
+	"tomato": Color(0.88, 0.24, 0.10),
+	"sesame": Color(0.93, 0.84, 0.72),
+	# --- ice cream cone ---
+	"cone": Color(0.87, 0.63, 0.32),
+	"grabelt": Color(0.55, 0.90, 0.74),
+	"mint": Color(0.72, 0.94, 0.82),
+	"icing": Color(0.96, 0.92, 0.95),
+	"cream": Color(0.97, 0.93, 0.90),
+	# --- donut ---
+	"dough": Color(0.88, 0.66, 0.38),
+	"frosting_pink": Color(0.96, 0.52, 0.72),
+	"frosting_choc": Color(0.38, 0.21, 0.10),
+	"drizzle": Color(0.96, 0.93, 0.97),
+	"choc_chip": Color(0.24, 0.13, 0.07),
+	"sprinkle_r": Color(0.94, 0.30, 0.36),
+	"sprinkle_g": Color(0.35, 0.86, 0.45),
+	"sprinkle_b": Color(0.38, 0.62, 0.95),
+	"sprinkle_y": Color(0.98, 0.86, 0.30),
+	# --- cake / croissant / cupcake / cookie ---
+	"sponge": Color(0.94, 0.80, 0.58),
+	"straw_field": Color(0.90, 0.24, 0.28),
+	"wrapper": Color(0.90, 0.84, 0.78),
+	"cookie_dough": Color(0.90, 0.70, 0.42),
+	"choc": Color(0.28, 0.15, 0.08),
+	"crust": Color(0.87, 0.58, 0.28),
+	"crust_dark": Color(0.68, 0.40, 0.16),
+	# --- sushi / eggs / melon ---
+	"nori": Color(0.08, 0.16, 0.11),
+	"rice": Color(0.94, 0.93, 0.90),
+	"salmon_flesh": Color(0.95, 0.48, 0.36),
+	"cucumber_flesh": Color(0.82, 0.92, 0.55),
+	"eggshell": Color(0.96, 0.95, 0.92),
+	"egg_white": Color(0.97, 0.97, 0.95),
+	"yolk": Color(0.98, 0.72, 0.10),
+	# --- fruit bodies ---
+	"pear_body": Color(0.74, 0.82, 0.28),
+	"green_body": Color(0.62, 0.76, 0.26),
+	"chip_dark": Color(0.18, 0.10, 0.05),
 }
+
+## Variant table per kind. Real foods: path + pool capacity + spawn weight +
+## normalized size ("h" = normalized gameplay HEIGHT like the original 8, or
+## "size" = the model's longest world dimension — natural for flat/huge shapes)
+## + explicit collect radius "r" (collision matches the visible footprint)
+## + emissive lift + 2D-icon sprite path. "surface_map" colors named surfaces;
+## "keep_mat" (Kenney colormap-textured kit models) preserves the imported
+## texture/material instead of flat tinting.
 const VAR_TABLE := [
+	# ------------------------------------------------------------- kind 0 — basic
 	[
-		{"path": "res://models/food/apple.obj", "cap": 90, "w": 0.40, "h": 0.98, "emit": 0.45},
-		{"path": "res://models/food/strawberry.obj", "cap": 45, "w": 0.28, "h": 0.82, "emit": 0.50},
-		{"path": "res://models/food/watermelon_slice.obj", "cap": 45, "w": 0.32, "h": 0.85, "emit": 0.35,
-			"surface_map": {"rind": "rind_green", "rindw": "rind_lime", "black": "seed_dark"}},
+		{"path": "res://models/food/apple.obj", "cap": 110, "w": 0.20, "h": 0.98, "r": 0.30, "emit": 0.45,
+			"sprite": "res://textures/food2d/apple.png"},
+		{"path": "res://models/food/strawberry.obj", "cap": 70, "w": 0.13, "h": 0.82, "r": 0.30, "emit": 0.50,
+			"leaf_top": true,
+			"sprite": "res://textures/food2d/strawberry.png"},
+		{"path": "res://models/food/watermelon_slice.obj", "cap": 70, "w": 0.13, "h": 0.85, "r": 0.30, "emit": 0.35,
+			"surface_map": {"rind": "rind_green", "rindw": "rind_lime", "black": "seed_dark"},
+			"sprite": "res://textures/food2d/watermelon.png"},
+		{"path": "res://models/food/pear.obj", "cap": 55, "w": 0.10, "size": 0.95, "r": 0.36,
+			"emit": 0.30, "surface_map": {"pear": "pear_body"},
+			"sprite": "res://textures/food2d/pear.png"},
+		{"path": "res://models/food_kit/orange.obj", "cap": 55, "w": 0.10, "size": 0.90, "r": 0.36,
+			"emit": 0.25, "keep_mat": true, "leaf_top": true,
+			"sprite": "res://textures/food2d/orange.png"},
+		{"path": "res://models/food/donut.obj", "cap": 45, "w": 0.08, "size": 0.88, "r": 0.42,
+			"emit": 0.35, "surface_map": {"dough": "dough", "icing": "frosting_pink", "white": "drizzle",
+				"sprinkle1": "sprinkle_r", "sprinkle2": "sprinkle_g", "sprinkle3": "sprinkle_b"},
+			"sprite": "res://textures/food2d/donut.png"},
+		{"path": "res://models/food/cupcake.obj", "cap": 40, "w": 0.07, "size": 0.95, "r": 0.38,
+			"emit": 0.40, "surface_map": {"paper": "wrapper", "icing": "frosting_pink", "apple": "straw_field",
+				"white": "cream",
+				"sprinkle1": "sprinkle_r", "sprinkle2": "sprinkle_g", "sprinkle3": "sprinkle_y"},
+			"sprite": "res://textures/food2d/cupcake.png"},
+		{"path": "res://models/food/cookie.obj", "cap": 40, "w": 0.07, "size": 0.70, "r": 0.30,
+			"emit": 0.25, "surface_map": {"dough": "cookie_dough", "choc": "choc"},
+			"sprite": "res://textures/food2d/cookie.png"},
+		{"path": "res://models/food/croissant.obj", "cap": 50, "w": 0.08, "size": 1.00, "r": 0.38,
+			"emit": 0.35, "surface_map": {"dough": "bun_top", "crust2": "crust_dark"},
+			"sprite": "res://textures/food2d/croissant.png"},
 	],
+	# ------------------------------------------------------------- kind 1 — rare
 	[
-		{"path": "res://models/food/cherries.obj", "cap": 20, "w": 0.58, "h": 0.78, "emit": 0.55},
-		{"path": "res://models/food/mushroom.obj", "cap": 14, "w": 0.42, "h": 0.75, "emit": 0.55,
-			"surface_map": {"white": "spore_light"}},
+		{"path": "res://models/food/cherries.obj", "cap": 30, "w": 0.26, "h": 0.78, "r": 0.34, "emit": 0.55,
+			"sprite": "res://textures/food2d/cherries.png"},
+		{"path": "res://models/food/mushroom.obj", "cap": 20, "w": 0.15, "h": 0.75, "r": 0.34, "emit": 0.55,
+			"surface_map": {"white": "spore_light"},
+			"sprite": "res://textures/food2d/mushroom.png"},
+		{"path": "res://models/food_kit/grapes.obj", "cap": 22, "w": 0.18, "size": 0.95, "r": 0.38,
+			"emit": 0.45, "keep_mat": true,
+			"sprite": "res://textures/food2d/grapes.png"},
+		{"path": "res://models/food/sushi_maki.obj", "cap": 14, "w": 0.12, "size": 0.85, "r": 0.34,
+			"emit": 0.30, "surface_map": {"nori": "nori", "rice": "rice", "salmon": "salmon_flesh",
+				"cucumber": "cucumber_flesh"},
+			"sprite": "res://textures/food2d/maki-salmon.png"},
+		{"path": "res://models/food/egg.obj", "cap": 14, "w": 0.12, "size": 0.70, "r": 0.28,
+			"emit": 0.30, "surface_map": {"eggshell": "eggshell"},
+			"sprite": "res://textures/food2d/egg.png"},
+		{"path": "res://models/food/fried_egg.obj", "cap": 20, "w": 0.17, "size": 0.80, "r": 0.34,
+			"emit": 0.35, "surface_map": {"eggw": "egg_white", "yolk": "yolk"},
+			"sprite": "res://textures/food2d/egg-cooked.png"},
 	],
+	# ------------------------------------------------------------ kind 2 — golden
 	[
-		{"path": "res://models/food/lemon.obj", "cap": 10, "w": 0.36, "h": 0.94, "emit": 0.60},
-		{"path": "res://models/food/banana.obj", "cap": 8, "w": 0.32, "h": 0.88, "emit": 0.60,
-			"surface_map": {"banana2": "seed_dark", "seed": "fruit_inner"}},
-		{"path": "res://models/food/carrot.obj", "cap": 7, "w": 0.32, "h": 1.05, "emit": 0.60},
+		{"path": "res://models/food/lemon.obj", "cap": 10, "w": 0.18, "h": 0.94, "r": 0.40, "emit": 0.60,
+			"leaf_top": true,
+			"sprite": "res://textures/food2d/lemon.png"},
+		{"path": "res://models/food/banana.obj", "cap": 8, "w": 0.15, "h": 0.88, "r": 0.40, "emit": 0.60,
+			"surface_map": {"banana2": "seed_dark", "seed": "fruit_inner"}, "leaf_top": true,
+			"sprite": "res://textures/food2d/banana.png"},
+		{"path": "res://models/food/carrot.obj", "cap": 8, "w": 0.13, "h": 1.05, "r": 0.40, "emit": 0.60,
+			"leaf_top": true,
+			"sprite": "res://textures/food2d/carrot.png"},
+		{"path": "res://models/food_kit/pineapple.obj", "cap": 10, "w": 0.16, "size": 1.30, "r": 0.46,
+			"emit": 0.35, "keep_mat": true,
+			"sprite": "res://textures/food2d/pineapple.png"},
+		{"path": "res://models/food/burger.obj", "cap": 10, "w": 0.15, "size": 1.05, "r": 0.48,
+			"emit": 0.30, "surface_map": {"crust": "bun", "patty": "patty", "cheese": "cheese",
+				"lettuce": "lettuce", "tomato": "tomato", "sesame": "sesame"},
+			"sprite": "res://textures/food2d/burger.png"},
+		{"path": "res://models/food/cake_slice.obj", "cap": 8, "w": 0.11, "size": 0.95, "r": 0.36,
+			"emit": 0.40, "surface_map": {"sponge": "sponge", "cream": "cream", "straw": "straw_field"},
+			"sprite": "res://textures/food2d/cake.png"},
+		{"path": "res://models/food/ice_cream_cone.obj", "cap": 10, "w": 0.12, "size": 1.10, "r": 0.38,
+			"emit": 0.45, "surface_map": {"cone": "cone", "mint": "mint", "icing": "icing"},
+			"sprite": "res://textures/food2d/ice-cream-cne.png"},
 	],
+	# ---------------------------------------------------------- kind 3 — power orb
 	[
-		{"path": "", "cap": 8, "w": 1.0, "h": 0.6, "emit": 1.0, "power": true},
+		{"path": "", "cap": 8, "w": 1.0, "h": 0.6, "r": 0.35, "emit": 1.0, "power": true},
 	],
 ]
 
 var arena_radius := 56.0
 var obstacles: Array = []     # [{pos, r}] for placement rejection
-var dark_theme := false       # Dark Theme: brighter emissives + rim so fruit pops
-var mode_2d := false          # 2D top-down mode: same contrast treatment
+var dark_theme := false       # Dark Theme: brighter emissives + rim so food pops
+var mode_2d := false          # 2D top-down mode: crisp flat-sprite icons
 
-var _slots: Array = []        # per kind: Array of pool dicts {mm, free, alive}
+var _slots: Array = []        # per kind: Array of pool dicts {mm, free, alive, r, sprite}
 var _var_caps: Array = []     # per kind: Array of capacities (deficit bookkeeping)
+var _kind_r: Array = []       # per kind: max variant radius (death-drop clearance)
+var _targets: Array = []      # effective per-kind alive targets (mobile-scaled)
 var _total := 0
 var _deficit: Array = []
 
@@ -82,20 +203,24 @@ var _pop_hits := 0
 
 # ---------------------------------------------------------------- lifecycle
 
-var hard_cap := HARD_CAP   # effective budget; phones run ~2/3 of it
+var hard_cap := HARD_CAP   # effective budget; phones run a leaner one
 var qa_freeze_respawn := false   # dev harness: isolate one eat case
 
 func _ready() -> void:
-	if OS.get_name() == "Android" or OS.get_name() == "iOS":
-		hard_cap = 112
+	var mobile := OS.get_name() == "Android" or OS.get_name() == "iOS"
+	hard_cap = MOBILE_HARD_CAP if mobile else HARD_CAP
+	_targets = KIND_TARGETS_MOBILE if mobile else KIND_TARGETS
 	for kind in VAR_TABLE.size():
 		var pools: Array = []
 		var caps: Array = []
+		var rmax := 0.0
 		for cfg: Dictionary in VAR_TABLE[kind]:
-			pools.append(_make_pool(_variant_mesh(kind, cfg), int(cfg["cap"])))
+			pools.append(_make_pool(_variant_mesh(kind, cfg), int(cfg["cap"]), cfg))
 			caps.append(int(cfg["cap"]))
+			rmax = maxf(rmax, float(cfg.get("r", KIND_RADIUS[kind])))
 		_slots.append(pools)
 		_var_caps.append(caps)
+		_kind_r.append(rmax)
 	_pop_mesh = SphereMesh.new()
 	_pop_mesh.radius = 0.10
 	_pop_mesh.height = 0.2
@@ -121,7 +246,7 @@ func _ready() -> void:
 
 func set_style(dark: bool, two_d: bool) -> void:
 	# live theme / graphics-mode switch: swap the variant meshes (instances,
-	# scores and slots untouched) so emissives + rims match the new look
+	# scores and slots untouched) so the court always shows the right artwork
 	dark_theme = dark
 	mode_2d = two_d
 	if not is_inside_tree() or _slots.is_empty():
@@ -132,13 +257,28 @@ func set_style(dark: bool, two_d: bool) -> void:
 			var cfg: Dictionary = VAR_TABLE[kind][vi]
 			var mm: MultiMesh = (pools[vi]["mm"] as MultiMesh)
 			mm.mesh = _variant_mesh(kind, cfg)
+			# pool flags must follow the artwork: 2D icon pools never tilt
+			# (no sink, no bob) while 3D pools keep the camera-facing lean
+			pools[vi]["sprite"] = (not bool(cfg.get("power", false))) and mode_2d
+			pools[vi]["sink"] = _pool_sink(mm.mesh)
 
 func _variant_mesh(kind: int, cfg: Dictionary) -> Mesh:
 	if bool(cfg.get("power", false)):
 		return _power_mesh()
-	return _real_fruit_mesh(cfg["path"], float(cfg["h"]), float(cfg["emit"]), cfg.get("surface_map", {}), kind)
+	if mode_2d and cfg.has("sprite"):
+		var size := float(cfg.get("size", float(cfg.get("h", 0.9))))
+		return _sprite_mesh(String(cfg["sprite"]), size, kind)
+	return _real_fruit_mesh(kind, cfg)
 
-func _make_pool(mesh: Mesh, cap: int) -> Dictionary:
+func _pool_sink(mesh: Mesh) -> float:
+	# camera-facing lean compensation: a tilted 3D food sinks one half into the
+	# floor, so the spawn float gets the sink back (real silhouette from above)
+	if mesh == null:
+		return 0.0
+	var bb := mesh.get_aabb()
+	return sin(FRUIT_TILT) * bb.size.y * 0.5
+
+func _make_pool(mesh: Mesh, cap: int, cfg: Dictionary) -> Dictionary:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.mesh = mesh
@@ -154,13 +294,14 @@ func _make_pool(mesh: Mesh, cap: int) -> Dictionary:
 	mmi.multimesh = mm
 	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mmi)
-	# camera-facing lean compensation: a tilted fruit sinks one half into the
-	# floor, so the spawn float gets the sink back (real silhouette from above)
+	var sprite := (not bool(cfg.get("power", false))) and mode_2d
+	# Flat 2D sprite icons never tilt — they carry no sink.
 	var sink := 0.0
-	if mesh != null:
+	if mesh != null and not sprite:
 		var bb := mesh.get_aabb()
 		sink = sin(FRUIT_TILT) * bb.size.y * 0.5
-	return {"mm": mm, "free": free, "alive": {}, "sink": sink}
+	return {"mm": mm, "free": free, "alive": {}, "sink": sink,
+		"r": float(cfg.get("r", 0.35)), "sprite": sprite}
 
 func reset() -> void:
 	for kind in _slots.size():
@@ -174,10 +315,10 @@ func reset() -> void:
 			alive.clear()
 	_total = 0
 	_deficit = []
-	_deficit.resize(KIND_TARGETS.size())
-	for kind in KIND_TARGETS.size():
+	_deficit.resize(_targets.size())
+	for kind in _targets.size():
 		_deficit[kind] = 0
-		for i in KIND_TARGETS[kind]:
+		for i in _targets[kind]:
 			if not _spawn_orb(kind):
 				_deficit[kind] += 1
 
@@ -191,7 +332,7 @@ func count_alive() -> int:
 
 func debug_state() -> String:
 	var parts: Array[String] = []
-	for kind in KIND_TARGETS.size():
+	for kind in _targets.size():
 		var nav := 0
 		var nfly := 0
 		var free_n := 0
@@ -211,17 +352,18 @@ func drop_orb(kind: int, pos: Vector3) -> void:
 	if _total >= hard_cap:
 		return
 	# Death drops originate on a body station: keep them inside the playable
-	# disc and push them out of boulders/trees. A fruit hidden INSIDE a rock is
+	# disc and push them out of boulders/trees. A food hidden INSIDE a rock is
 	# the classic "left behind, cannot be eaten" report.
+	var r: float = _kind_r[kind]
 	var p := Vector3(pos.x, 0.0, pos.z).limit_length(arena_radius - SPAWN_EDGE)
-	var drop_ok := _clear_of_obstacles(p, KIND_RADIUS[kind])
+	var drop_ok := _clear_of_obstacles(p, r)
 	for attempt in 7:
 		if drop_ok:
 			break
 		var inward := -p.normalized() if p.length_squared() > 0.01 else Vector3.FORWARD
 		p += inward * 1.4
 		p = p.limit_length(arena_radius - SPAWN_EDGE)
-		drop_ok = _clear_of_obstacles(p, KIND_RADIUS[kind])
+		drop_ok = _clear_of_obstacles(p, r)
 	if not drop_ok:
 		return
 	_spawn_orb(kind, p)
@@ -257,7 +399,7 @@ func _spawn_orb(kind: int, at: Vector3 = Vector3.INF) -> bool:
 	var free: Array[int] = s["free"]
 	if free.is_empty():
 		return false
-	var r: float = KIND_RADIUS[kind]
+	var r: float = s["r"]
 	var pos := at
 	if pos == Vector3.INF:
 		pos = _pick_spawn_pos(r)
@@ -269,17 +411,18 @@ func _spawn_orb(kind: int, at: Vector3 = Vector3.INF) -> bool:
 			return false
 	var idx: int = free.pop_back()
 	(s["alive"] as Dictionary)[idx] = {
-		"pos": pos, "phase": randf() * TAU, "kind": kind, "born": t_now()}
+		"pos": pos, "phase": randf() * TAU, "kind": kind, "born": t_now(),
+		"size": float(VAR_TABLE[kind][vi].get("size", float(VAR_TABLE[kind][vi].get("h", 0.9)))),}
 	_total += 1
 	return true
 
 ## Random disc sampling with a guaranteed-clear fallback scan. A rejected
-## candidate never becomes fruit: every orb the player sees is on open ground,
+## candidate never becomes food: every orb the player sees is on open ground,
 ## inside the arena, and separated from other orbs.
 func _pick_spawn_pos(r: float) -> Vector3:
 	var best := Vector3.INF
 	var best_clear := -999.0
-	for attempt in 14:
+	for attempt in 22:
 		var ang := randf() * TAU
 		var rad := sqrt(randf()) * (arena_radius - SPAWN_EDGE)
 		var pos := Vector3(sin(ang) * rad, 0.0, cos(ang) * rad)
@@ -290,9 +433,9 @@ func _pick_spawn_pos(r: float) -> Vector3:
 		if cl >= 1.0 and _clear_of_fruits(pos, r):
 			return pos
 	# spiral fallback: deterministic open bands, no infinite retry loop
-	for ring in 5:
-		var rad: float = arena_radius * (0.22 + 0.145 * float(ring))
-		var steps := 20 + ring * 8
+	for ring in 6:
+		var rad: float = arena_radius * (0.20 + 0.125 * float(ring))
+		var steps := 24 + ring * 8
 		var off := randf() * TAU
 		for k in steps:
 			var ang := off + TAU * float(k) / float(steps)
@@ -325,21 +468,22 @@ func t_now() -> float:
 	return Time.get_ticks_msec() * 0.001
 
 ## A live theme/mode switch rebuilds the arena, so the obstacle list can change
-## under fruit that was already on the ground. Re-check every passive fruit
+## under food that was already on the ground. Re-check every passive orb
 ## against the NEW obstacles/arena and retire any that is now buried in a rock
 ## or outside the safe ring; the normal deficit logic respawns it on open
-## ground. Flying fruit is already claimed and is left alone.
+## ground. Flying food is already claimed and is left alone.
 func revalidate_spawns() -> void:
 	for kind in _slots.size():
 		for s: Dictionary in _slots[kind]:
 			var alive: Dictionary = s["alive"]
+			var pr: float = s["r"]
 			for idx in alive.keys():
 				var rec: Dictionary = alive[idx]
 				if rec.has("fly"):
 					continue
 				var pos: Vector3 = rec["pos"]
 				if pos.length() > arena_radius - SPAWN_EDGE \
-						or not _clear_of_obstacles(pos, KIND_RADIUS[kind]):
+						or not _clear_of_obstacles(pos, pr):
 					_bury_idx(s, idx, kind)
 
 func alive_positions() -> Array:
@@ -353,12 +497,14 @@ func alive_positions() -> Array:
 					out.append(rec["pos"])
 	return out
 
-## All edible fruits whose GROUND position is within `reach` of the swept
+## All edible foods whose GROUND position is within `reach` of the swept
 ## segment from -> to (the snake's mouth at the previous/current eat tick).
-## Sweeping is what lets a fast head (and a 30 Hz eat tick) collect every fruit
+## Sweeping is what lets a fast head (and a 30 Hz eat tick) collect every food
 ## it visibly crosses. Returns the actual pool records: MatchWorld hands them
 ## straight back to fly_rec(), so there is no position lookup that could pick
-## the wrong fruit or double-count one.
+## the wrong orb or double-count one. Reach scales with each variant's OWN
+## collect radius, so big burgers are gatherable around their full footprint
+## and tiny eggs still need a real mouth contact.
 func eat_hits_sweep(from: Vector3, to: Vector3, reach: float) -> Array:
 	var out: Array = []
 	var sx := to.x - from.x
@@ -367,7 +513,7 @@ func eat_hits_sweep(from: Vector3, to: Vector3, reach: float) -> Array:
 	for kind in _slots.size():
 		for s: Dictionary in _slots[kind]:
 			var alive: Dictionary = s["alive"]
-			var rr: float = reach + float(kind) * 0.03 + KIND_RADIUS[kind] * 0.5
+			var rr: float = reach + float(kind) * 0.03 + float(s["r"]) * 0.5
 			var rr2 := rr * rr
 			for idx in alive.keys():
 				var rec: Dictionary = alive[idx]
@@ -381,8 +527,7 @@ func eat_hits_sweep(from: Vector3, to: Vector3, reach: float) -> Array:
 					qx = from.x + sx * t
 					qz = from.z + sz * t
 				# Degenerate segment (a freshly spawned/settled mouth): test the
-				# POINT from, never each fruit against itself. The old fallback
-				# turned every fruit in the arena into a hit on a spawn frame.
+				# POINT from, never each orb against itself.
 				var dx := p.x - qx
 				var dz := p.z - qz
 				if dx * dx + dz * dz < rr2:
@@ -390,7 +535,7 @@ func eat_hits_sweep(from: Vector3, to: Vector3, reach: float) -> Array:
 	return out
 
 func remove_orb_at_pos(kind: int, pos: Vector3) -> bool:
-	# removes ONE fruit of this kind at pos (kept for dev tooling).
+	# removes ONE orb of this kind at pos (kept for dev tooling).
 	var pools: Array = _slots[kind]
 	for s: Dictionary in pools:
 		var alive: Dictionary = s["alive"]
@@ -403,17 +548,18 @@ func remove_orb_at_pos(kind: int, pos: Vector3) -> bool:
 	return false
 
 ## Start the eat-flight for an EXACT record returned by eat_hits_sweep. The
-## flight starts at the fruit's current rendered position and ends at the
-## eater's live mouth, so the hand-off is seamless (no "fruit teleports to a
-## point above the head" artefact) and the bite happens where the player sees it.
+## flight starts at the orb's current rendered position and ends at the
+## eater's live mouth, so the hand-off is seamless (no "food teleports to a
+## point above the head" artefact) and the bite happens where the player sees
+## it. Bigger food flies slower and stays readable the whole way in.
 func fly_rec(rec: Dictionary, eater: Node3D) -> bool:
 	if rec.has("fly"):
 		return false
 	var kind := int(rec["kind"])
 	var from: Vector3 = rec.get("vis", (rec["pos"] as Vector3) + Vector3.UP * (BOB_BASE[kind] + 0.18))
+	var dur := clampf(from.distance_to(_mouth_of(eater)) * 0.085 + float(rec.get("size", 0.9)) * 0.045, FLY_TIME, FLY_TIME_MAX)
 	rec["fly"] = {"t": 0.0, "from": from, "snake": eater,
-		"start_ms": Time.get_ticks_msec(),
-		"dur": clampf(from.distance_to(_mouth_of(eater)) * 0.085, FLY_TIME, FLY_TIME_MAX)}
+		"start_ms": Time.get_ticks_msec(), "dur": dur}
 	return true
 
 func _mouth_of(snake) -> Vector3:
@@ -459,7 +605,7 @@ func _process(delta: float) -> void:
 	var t := Time.get_ticks_msec() * 0.001
 	# passive orbs re-write their (static-ish) transforms at ~20 Hz: the bob
 	# waves are 0.3-0.5 Hz, so 1/3 rate is visually identical and cuts the
-	# per-frame MultiMesh churn (178 instances) to a third on weak devices.
+	# per-frame MultiMesh churn (≈119 instances) to a third on weak devices.
 	_bob_frame += 1
 	var bob_tick: bool = _bob_frame % 3 == 0
 	for kind in _slots.size():
@@ -485,79 +631,115 @@ func _process(delta: float) -> void:
 					var p := from.lerp(target, e)
 					p += Vector3.UP * (0.28 * sin(q * PI))
 					var yaw := q * 5.0 + float(rec["phase"])
-					# hold full size until it reaches the mouth, then vanish
-					var sc := 1.0 - 0.90 * smoothstep(0.45, 1.0, q)
+					# hold full size while it is visibly flying, shrink into the jaws
+					var sc := 1.0 - 0.92 * smoothstep(0.55, 1.0, q)
 					mm.set_instance_transform(idx, Transform3D(
 						Basis(Vector3.UP, yaw).scaled(Vector3(sc, sc, sc)), p))
 					if q >= 1.0:
 						_bury_idx(s, idx, kind)
 						pop_at(target - Vector3.UP * 0.16, kind)
-						# visible gulp AFTER the fruit lands, not on first touch
+						# visible gulp AFTER the orb lands, not on first touch
 						if snake.has_method("swallow"):
-							snake.swallow()
+							snake.swallow(float(rec.get("size", 0.9)))
 					continue
 				if not bob_tick:
 					continue   # passive orb: transform refresh at the throttled rate
 				var ph: float = rec["phase"]
 				var p: Vector3 = rec["pos"]
 				var yaw := sin(t * 0.7 + ph) * 0.28 + (t * 2.2 if kind == 3 else 0.0)
-				var yy: float = BOB_BASE[kind] + sin(t * BOB_SPD[kind] + ph) * BOB_AMP[kind]
-				# spawn pop-in: elastic scale-up over the first 0.3 s (spec §4)
 				var sc := 1.0
 				var age: float = t - float(rec.get("born", t))
-				if age < 0.3:
-					var k := age / 0.3
-					sc = 1.0 + 0.45 * sin(k * PI) * (1.0 - k) - 0.45 * k * (1.0 - k)
-					sc = maxf(sc, 0.05)
-					yy -= 0.5 * (1.0 - k)
-				var basis: Basis
-				if kind == 3:
-					basis = Basis(Vector3.UP, yaw).scaled(Vector3(sc, sc, sc))   # power ring stays level
+				# spawn pop-in: elastic scale-up over the first 0.3 s (spec §4)
+				var yy: float
+				if bool(s["sprite"]):
+					# 2D icon sprites lie FLAT on the court: no tilt, no sink,
+					# no bob — the shadow stays glued to the ground and the
+					# icon is always fully readable from the top-down camera.
+					yy = 0.0
+					if age < 0.3:
+						var k := age / 0.3
+						sc = 1.0 + 0.45 * sin(k * PI) * (1.0 - k) - 0.45 * k * (1.0 - k)
+						sc = maxf(sc, 0.05)
+					var vis := p + Vector3(0.0, 0.16, 0.0)
+					rec["vis"] = vis
+					mm.set_instance_transform(idx, Transform3D(
+						Basis(Vector3.UP, yaw).scaled(Vector3(sc, sc, sc)), vis))
 				else:
-					# fixed camera-facing lean: a real fruit silhouette (side
-					# profile + stem/leaf) instead of a top-view circle
-					basis = (Basis(Vector3.UP, yaw) * Basis(Vector3(1, 0, 0), FRUIT_TILT)) \
-						.scaled(Vector3(sc, sc, sc))
-					yy += float(s["sink"])
-				var vis := p + Vector3(0.0, yy, 0.0)
-				rec["vis"] = vis
-				mm.set_instance_transform(idx, Transform3D(basis, vis))
+					# 3D model: fixed camera-facing lean (side profile + stem)
+					basis3d(p, kind, ph, yaw, sc, age, s, idx, t, rec, mm)
 	# trickle respawn (top: 1 per frame) — also respects the global budget.
 	# Only consume the deficit when a valid spot was actually found; otherwise
 	# the count could silently fall below the target forever.
-	for kind in KIND_TARGETS.size():
+	for kind in _targets.size():
 		if _deficit[kind] > 0 and _total < hard_cap and not qa_freeze_respawn:
 			if _spawn_orb(kind):
 				_deficit[kind] -= 1
 			break
 
-# ---------------------------------------------------------------- fruit meshes
-# Fruits use the LowPolyFoodPack models (user-provided OBJ, flat colors) when
-# available, normalized to gameplay size with our vivid color-coding + emission
-# so each kind stays readable at distance; procedural builders are no longer
-# needed — the pack carries every variant. Each final mesh = model surfaces +
-# ground shadow blob → ONE mesh.
+func basis3d(p: Vector3, kind: int, ph: float, yaw: float, sc: float, age: float, pool: Dictionary, idx: int, t: float, rec: Dictionary, mm: MultiMesh) -> void:
+	var yy: float = BOB_BASE[kind] + sin(t * BOB_SPD[kind] + ph) * BOB_AMP[kind]
+	if age < 0.3:
+		var k := age / 0.3
+		sc = 1.0 + 0.45 * sin(k * PI) * (1.0 - k) - 0.45 * k * (1.0 - k)
+		sc = maxf(sc, 0.05)
+		yy -= 0.5 * (1.0 - k)
+	var basis: Basis
+	if kind == 3:
+		basis = Basis(Vector3.UP, yaw).scaled(Vector3(sc, sc, sc))   # power ring stays level
+	else:
+		# fixed camera-facing lean: a real food silhouette (side profile +
+		# stem/leaf) instead of a top-view circle
+		basis = (Basis(Vector3.UP, yaw) * Basis(Vector3(1, 0, 0), FRUIT_TILT)) \
+			.scaled(Vector3(sc, sc, sc))
+		yy += float(pool["sink"])
+	var vis := p + Vector3(0.0, yy, 0.0)
+	rec["vis"] = vis
+	mm.set_instance_transform(idx, Transform3D(basis, vis))
 
-func _real_fruit_mesh(path: String, height: float, emit: float, surface_map: Dictionary, kind: int) -> Mesh:
+# ---------------------------------------------------------------- food meshes
+# Foods use the user-provided low-poly packs (LowPolyFoodPack OBJ variants and
+# the colormap-textured Kenney kit models), normalized to natural gameplay
+# size. Each final mesh = model surfaces (+ halo for rare/golden) + ground
+# shadow blob → ONE mesh, so the whole court is a handful of draw calls.
+# 2D top-down mode instead draws the matching polished ICON sprite.
+
+func _food_scale(aabb: AABB, cfg: Dictionary) -> float:
+	# "h": the ORIGINAL height-normalized code path for the classic 8 variants
+	# (pixel-identical scale to v1.1). "size": upscale the LONGEST AABB
+	# dimension to the target — proportional shapes for flat cookies/donuts and
+	# tall pineapples alike; base stays glued to y=0 (lift below).
+	if not cfg.has("size"):
+		return float(cfg["h"]) / maxf(aabb.size.y, 0.001)
+	return float(cfg["size"]) / maxf(maxf(aabb.size.x, aabb.size.y), aabb.size.z)
+
+func _real_fruit_mesh(kind: int, cfg: Dictionary) -> Mesh:
+	var path := String(cfg["path"])
+	var keep := bool(cfg.get("keep_mat", false))
 	var src: Mesh = load(path) as Mesh
 	var am := ArrayMesh.new()
 	if src == null:
 		push_warning("Food model missing: %s — packing empty mesh" % path)
 		return am
-	# Dark Theme / 2D mode: a modest emissive lift keeps fruit edge-readable
+	# Dark Theme / 2D mode: a modest emissive lift keeps food edge-readable
 	# on the darkened courts — but heavy glow washes the models flat, so the
-	# saturations stay low and readability comes from the (now bigger) shape.
+	# saturations stay low and readability comes from the (bigger) silhouette.
+	var emit: float = float(cfg.get("emit", 0.4))
 	var emit_b := emit * (0.55 if dark_theme else (0.38 if mode_2d else 0.0))
 	var bb := src.get_aabb()
-	var sc: float = height / maxf(bb.size.y, 0.001)
+	var sc: float = _food_scale(bb, cfg)
 	var lift: float = -bb.position.y * sc
+	var surface_map: Dictionary = cfg.get("surface_map", {})
 	for i in src.get_surface_count():
 		var nm: String = ""
 		if src is ArrayMesh:
 			nm = (src as ArrayMesh).surface_get_name(i)
 		var st := SurfaceTool.new()
 		st.append_from(src, i, Transform3D(Basis().scaled(Vector3(sc, sc, sc)), Vector3(0.0, lift, 0.0)))
-		if nm.contains("leaf"):
+		if keep:
+			# colormap-textured kit models: keep the imported texture material
+			# (duplicate so per-theme rim edits never leak into other users)
+			st.set_material(_import_mat(src.surface_get_material(i), emit_b))
+		elif nm.contains("leaf"):
 			st.set_material(_leaf_mat())
 		elif nm.contains("trunk") or nm.contains("stalk") or nm.contains("stem"):
 			st.set_material(_stem_mat())
@@ -566,52 +748,105 @@ func _real_fruit_mesh(path: String, height: float, emit: float, surface_map: Dic
 		else:
 			st.set_material(_fruit_base_mat(KIND_COLORS[kind], emit_b, 0.52))
 		st.commit(am)
-	# rare / golden fruit sit in a soft additive glow halo so they read as
-	# special pickups from the top-down camera (spec §4)
+	# rare / golden food sits in a soft additive glow halo so it reads as a
+	# special pickup from the top-down camera (spec §4)
 	if kind >= 1:
+		var halo_r := 1.35 + float(cfg.get("size", 0.0)) * 0.45
 		var sh := SurfaceTool.new()
-		var halo := _halo_surface(KIND_COLORS[kind])
+		var halo := _halo_surface(KIND_COLORS[kind], halo_r)
 		sh.append_from(halo, 0, Transform3D(Basis(), Vector3(0.0, 0.02, 0.0)))
 		sh.set_material(halo.material)
 		sh.commit(am)
-	# produce shapes without a leaf/stem surface in the OBJ get a tiny top
-	# stem + leaf so the top-down silhouette still says "fruit" (an apple from
-	# directly above is otherwise just a red circle)
-	if src is ArrayMesh:
-		var lm := src as ArrayMesh
-		var shaped := false
-		for i in lm.get_surface_count():
-			var snm := lm.surface_get_name(i)
-			if snm.contains("leaf") or snm.contains("stem") or snm.contains("rind"):
-				shaped = true
-				break
-		if not shaped:
-			_append_top_leaf(am, height)
+	# round fruits without their own stem/leaf geometry get a tiny top stem +
+	# leaf so the top-down silhouette still says "fruit" (a lemon from directly
+	# above is otherwise just a yellow circle). Snack foods (burger / sushi /
+	# donut…) and models that bake in their own details never get one — the
+	# variant's "leaf_top" flag preserves v1.1's auto-leaf sets exactly.
+	if bool(cfg.get("leaf_top", false)):
+		_append_top_leaf(am, _target_height(cfg))
 	var sbl := SurfaceTool.new()
-	_blob_surface(sbl)
+	_blob_surface(sbl, _target_height(cfg))
 	sbl.commit(am)
 	return am
 
+func _target_height(cfg: Dictionary) -> float:
+	var src: Mesh = load(String(cfg["path"])) as Mesh
+	if src == null:
+		return float(cfg.get("h", float(cfg.get("size", 0.9))))
+	var bb := src.get_aabb()
+	return bb.size.y * _food_scale(bb, cfg)
+
 func _append_top_leaf(am: ArrayMesh, height: float) -> void:
+	if height <= 0.02:
+		return
 	var stem := CylinderMesh.new()
 	stem.top_radius = 0.012
 	stem.bottom_radius = 0.028
-	stem.height = height * 0.10
+	stem.height = maxf(height * 0.10, 0.03)
 	var st := SurfaceTool.new()
 	st.append_from(stem, 0, Transform3D(Basis(), Vector3(0.0, height - stem.height * 0.42, 0.0)))
 	st.set_material(_stem_mat())
 	st.commit(am)
 	var leaf := PlaneMesh.new()
-	leaf.size = Vector2(height * 0.26, height * 0.13)
+	leaf.size = Vector2(height * 0.26 + 0.05, height * 0.13 + 0.03)
 	var st2 := SurfaceTool.new()
 	var tb := Basis(Vector3(1, 0, 0), -0.14) * Basis(Vector3(0, 1, 0), 0.5)
 	st2.append_from(leaf, 0, Transform3D(tb, Vector3(height * 0.10, height - stem.height * 0.80, height * 0.04)))
 	st2.set_material(_leaf_mat())
 	st2.commit(am)
 
-func _halo_surface(tint: Color) -> QuadMesh:
+## 2D top-down icon sprite: a polished flat image of the exact food, drawn as
+## an unshaded ground-aligned quad (screen-up stays image-up), with the same
+## rarity halo + soft contact shadow baked around it. Alpha-scissor keeps it
+## crisp and blend order-safe on any arena.
+func _sprite_mesh(path: String, size: float, kind: int) -> Mesh:
+	var am := ArrayMesh.new()
+	var tex: Texture2D = load(path) as Texture2D
+	if tex == null:
+		push_warning("Food sprite missing: %s — packing empty mesh" % path)
+		return am
+	var img: Image = tex.get_image()
+	var px := img.get_size()
+	var aspect := px.x / maxf(float(px.y), 1.0)
+	var wd := size
+	var ln := size
+	if aspect >= 1.0:
+		ln = size / aspect
+	else:
+		wd = size * aspect
 	var q := QuadMesh.new()
-	q.size = Vector2(1.7, 1.7)
+	q.size = Vector2(wd, ln)
+	q.orientation = PlaneMesh.FACE_Y
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	m.alpha_scissor_threshold = 0.5
+	m.albedo_texture = tex
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if dark_theme:
+		m.albedo_color = Color(0.94, 0.93, 0.92)  # soft lift against dark courts
+	q.material = m
+	var st := SurfaceTool.new()
+	# rarity halo + contact shadow under the icon, then the icon itself top
+	if kind >= 1:
+		var halo_r := (maxf(wd, ln) * 1.05 + 0.45)
+		var halo := _halo_surface(KIND_COLORS[kind], halo_r)
+		st.append_from(halo, 0, Transform3D(Basis(), Vector3(0.0, 0.014, 0.0)))
+		st.set_material(halo.material)
+		st.commit(am)
+	var stl := SurfaceTool.new()
+	_blob_surface(stl, maxf(wd, ln), 0.010)
+	stl.commit(am)
+	var stq := SurfaceTool.new()
+	stq.append_from(q, 0, Transform3D(Basis(), Vector3(0.0, 0.022, 0.0)))
+	stq.set_material(q.material)
+	stq.commit(am)
+	return am
+
+func _halo_surface(tint: Color, radius: float = 1.7) -> QuadMesh:
+	var q := QuadMesh.new()
+	var sz := radius
+	q.size = Vector2(sz, sz)
 	q.orientation = PlaneMesh.FACE_Y
 	var g := Gradient.new()
 	g.offsets = PackedFloat32Array([0.0, 0.4, 1.0])
@@ -644,6 +879,24 @@ func _mapped_mat(name_key: String) -> StandardMaterial3D:
 		m.emission_energy_multiplier = 0.25
 	return m
 
+## Reuse an IMPORTED model material (Kenney colormap kit / LowPack MTL colors):
+## preserve the natural look, add a light emission lift in dark/2D, and a rim
+## edge so textured food stays readable on dark courts.
+func _import_mat(base: Material, emit_lift: float) -> StandardMaterial3D:
+	var m := (base as StandardMaterial3D).duplicate() as StandardMaterial3D
+	if m == null:
+		m = StandardMaterial3D.new()
+	if emit_lift > 0.0:
+		m.emission_enabled = true
+		m.emission = m.albedo_color
+		m.emission_energy_multiplier = clampf(emit_lift * 0.5, 0.15, 0.6)
+	if dark_theme or mode_2d:
+		m.rim_enabled = true
+		m.rim = 0.30
+		m.rim_tint = 0.55
+	m.roughness = minf(m.roughness, 0.72) if m.roughness > 0.0 else 0.55
+	return m
+
 func _power_mesh() -> Mesh:
 	# power orb: bright emissive core + spinning cyan ring + shadow blob
 	var am := ArrayMesh.new()
@@ -666,7 +919,7 @@ func _power_mesh() -> Mesh:
 	sr.set_material(_fruit_base_mat(Color(0.42, 0.92, 1.0), 1.0, 0.25))
 	sr.commit(am)
 	var sbl := SurfaceTool.new()
-	_blob_surface(sbl)
+	_blob_surface(sbl, 0.5)
 	sbl.commit(am)
 	return am
 
@@ -704,15 +957,15 @@ func _leaf_mat(bright: Color = Color(0.26, 0.52, 0.18)) -> StandardMaterial3D:
 	m.emission_energy_multiplier = 0.18
 	return m
 
-func _blob_surface(st: SurfaceTool) -> void:
-	# soft contact shadow: small dark quad under the fruit
-	var q := _blob_mesh()
-	st.append_from(q, 0, Transform3D(Basis(), Vector3(0.0, 0.03, 0.0)))
+func _blob_surface(st: SurfaceTool, height: float, at_y: float = 0.03) -> void:
+	# soft contact shadow: a dark quad under the food, sized to its footprint
+	var q := _blob_mesh(maxf(minf(maxf(height, 0.35), 1.75), 0.6))
+	st.append_from(q, 0, Transform3D(Basis(), Vector3(0.0, at_y, 0.0)))
 	st.set_material(q.material)
 
-func _blob_mesh() -> QuadMesh:
+func _blob_mesh(spread: float = 0.95) -> QuadMesh:
 	var q := QuadMesh.new()
-	q.size = Vector2(0.95, 0.95)
+	q.size = Vector2(spread, spread)
 	q.orientation = PlaneMesh.FACE_Y
 	var g := Gradient.new()
 	g.offsets = PackedFloat32Array([0.0, 0.55, 1.0])

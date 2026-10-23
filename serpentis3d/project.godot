@@ -7,7 +7,7 @@ config_version=5
 
 config/name="VenomRush"
 config/description="VenomRush — Evolve. Hunt. Dominate. An original 3D snake arena survival game."
-config/version="1.1.0"
+config/version="1.2.0"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7")
 config/icon="res://icon.png"
@@ -29,6 +29,13 @@ window/size/viewport_height=720
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 handheld/orientation=4
+
+[physics]
+
+; Smooth rendered motion on 90/120 Hz phones: node transforms are interpolated
+; between physics ticks so snakes/food/camera do not visibly step between them
+; (the "stutter on high-refresh screens" symptom). Simulation stays at 60 Hz.
+common/physics_interpolation=true
 
 [rendering]
 

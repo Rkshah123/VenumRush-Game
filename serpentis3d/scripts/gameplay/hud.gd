@@ -583,7 +583,7 @@ func _build_menu() -> void:
 	act.add_child(_menu_main)
 	# One dominant primary action, then full-width secondary actions: every
 	# label keeps a huge, easy-to-hit slab instead of shrinking into a grid.
-	_play_btn = _menu_button(_menu_main, "PLAY", func(): play_pressed.emit(), true)
+	_play_btn = _menu_button(_menu_main, "▶ PLAY", func(): play_pressed.emit(), true)
 	_menu_button(_menu_main, "SNAKES", func(): _menu_page("skins"))
 	_menu_button(_menu_main, "HOW TO PLAY", func(): _menu_page("help"))
 	_menu_button(_menu_main, "SETTINGS", func(): _swap_menu(false))
@@ -603,7 +603,7 @@ func _build_menu() -> void:
 	var hint := _mk_label("", int(13 * _ui_s), "dim", _menu_main)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.text = "mouse steers, LMB boosts" if not _is_touch_device() else "drag steers, 2nd finger boosts"
-	hint.text = "OFFLINE BUILD v1.1 - " + hint.text
+	hint.text = "OFFLINE BUILD v1.2 - " + hint.text
 
 	# ---------------------------------------------------------- orientation
 	# The action column sits on a soft themed card so every page — SNAKES, HOW

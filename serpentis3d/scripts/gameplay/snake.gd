@@ -96,6 +96,7 @@ var match_world = null
 var grounded := false
 var body_lift := 0.0
 var vertical_wave := true
+var bank := true   # roll/bank into turns — suppressed in 2D top-down (see match_world)
 
 var body_mi: MeshInstance3D
 var _mat: ShaderMaterial
@@ -104,6 +105,9 @@ var _spine_img: Image = null   # reused upload buffer (allocated once)
 var _spine := PackedFloat32Array()   # RING_COUNT*4 floats
 var _raw := PackedVector3Array()     # RING_COUNT station source points
 var _perp := PackedVector3Array()    # lateral direction per station
+var _tan := PackedFloat32Array()     # RING_COUNT*4: CPU-smoothed station tangent (frame-stable tube)
+var _tan_img: Image = null           # reused upload buffer for the tangent texture
+var _tan_tex: ImageTexture
 
 # Collision stations (updated per physics frame)
 var coll_pos := PackedVector3Array()
@@ -141,6 +145,7 @@ func _ready() -> void:
 	_spine.resize(RING_COUNT * 4)
 	_raw.resize(RING_COUNT)
 	_perp.resize(RING_COUNT)
+	_tan.resize(RING_COUNT * 4)
 	_build_body()
 	_build_head()
 	# shield halo: emissive shell around the head, shown while Shield is up
@@ -258,13 +263,21 @@ func _physics_process(delta: float) -> void:
 
 	_spine_tick += 1
 	if spine_stride > 1 and not spine_full_rate and _spine_tick % spine_stride != 0:
+		# Half-rate spine serpents: the (expensive) tube rebuild still runs at
+		# half rate, but the ROOT ANCHOR and the HEAD RIG refresh EVERY tick at
+		# the live position/heading. Otherwise the whole body — and above all
+		# its head — lags one tick behind the steering, which read as an AI
+		# snake's head popping sideways around corners.
+		global_position = head_pos
+		_length_animate(delta)
+		_update_head(delta, true)
 		return
 	# Off-player serpents on the phone tier rebuild+upload the spine tube at
 	# half rate (the rebuild is the single largest sim cost); the trail history
 	# and steering stay at the full rate so gameplay behavior is unchanged.
 	_update_spine(delta)
 	_length_animate(delta)
-	_update_head(delta)
+	_update_head(delta, false)
 
 # ------------------------------------------------------------------ steering
 
@@ -338,8 +351,6 @@ func _update_spine(delta: float) -> void:
 			remain += ds
 
 	var body_r := _body_radius()
-	var motion := clampf(speed_cur / BASE_SPEED, 0.10, 1.35)
-	var k_wave := TAU / 5.2  # ~5.2 m serpentine wavelength
 	# Tangent smoothing window: at least ~1.5 history samples wide. Short
 	# snakes have tiny station spacing, so a 1-station tangent would flip at
 	# every 7.5 cm history segment on a hard turn, making the tube bunch.
@@ -353,20 +364,27 @@ func _update_spine(delta: float) -> void:
 		var dir_i := d3.normalized() if d3.length_squared() > 1e-8 else Vector3(0, 0, 1)
 		var perp := Vector3(-dir_i.z, 0.0, dir_i.x)  # lateral
 		_perp[i] = perp
-		var t := float(i) / float(RING_COUNT - 1)
-		# Traveling wave, head to tail. Amplitude grows toward the tail (real
-		# snakes) and scales with body length: a 6 m snake must not carry the
-		# same 5.2 m-wavelength, 0.4 m amplitude as a 70 m one, or its closely
-		# spaced spine stations visibly bunch/stretch.
-		var amp := clampf(0.42 * pow(t, 1.18) * clampf(length / 20.0, 0.25, 1.0), 0.0, 0.5)
-		var ph := wave_phase + wave_phase_off
-		var sway := sin(float(i) * ds * k_wave - ph)
-		# Menu-only micro vertical ripple. Gameplay snakes stay flat on the
-		# arena surface (no bobbing / sinking into the ground in 2D or 3D).
-		var vsway := 0.0
+		var o4 := i * 4
+		# Bake the smoothed tangent for the GPU ring frame (see upload below):
+		# the shader used to re-derive its frame from 1-texel spine deltas,
+		# which flipped direction on hairpins and made the tube hop.
+		_tan[o4] = dir_i.x
+		_tan[o4 + 1] = dir_i.y
+		_tan[o4 + 2] = dir_i.z
+		# STRICT PATH TRACKING: every station sits exactly ON the path the head
+		# really travelled, at exact `ds` spacing — each segment follows the
+		# precise path of the segment ahead of it with constant spacing. The
+		# old parametric lateral wave displaced stations up to ~0.4 m off that
+		# path (and the per-station lateral axis rotates fast through corners),
+		# which read as bunching, stretching, tail whip and overlap — the exact
+		# artifacts this rewrite removes. The organic slither now lives in the
+		# real path (turns/boost movements) plus the head-rig living bob.
+		var p := _raw[i]
 		if vertical_wave:
-			vsway = 0.05 * amp * sin(float(i) * ds * k_wave * 2.0 - ph * 0.6)
-		var p := _raw[i] + perp * (amp * sway * motion) + Vector3.UP * vsway
+			# Menu-only micro vertical ripple. Gameplay snakes stay flat on
+			# the arena surface (no bobbing / sinking in 2D or 3D).
+			var tv := float(i) * ds * (TAU / 5.2) * 2.0 - (wave_phase + wave_phase_off) * 0.6
+			p += Vector3.UP * (0.02 * sin(tv))
 
 		var r := _radius_at(i, body_r)
 		var o := i * 4
@@ -380,9 +398,15 @@ func _update_spine(delta: float) -> void:
 
 	# Root carries the mesh: anchor the local tube at the head position.
 	global_position = head_pos
-	# bank the body into turns (roll around the spine axis) for natural motion
-	if body_mi != null:
-		body_mi.rotation.z = _lean * 0.30
+	# Bank into turns INSIDE the ring frame: each ring rolls a little more
+	# than the one ahead (u_bank · t in the vertex shader), a continuous
+	# corkscrew-like lean. Rotating the whole body MeshInstance about the
+	# root's roll axis — the old body_mi.rotation.z — levered every station
+	# by its DISTANCE from the head, so a turn start/end visibly whipped the
+	# tail of a long snake sideways by metres (the big "jump/pop" artifact).
+	# Suppressed in 2D top-down where a roll reads as the body squashing.
+	if _mat != null:
+		_mat.set_shader_parameter(&"u_bank", _lean * (0.30 if bank else 0.0))
 
 	# upload to GPU — stations map along WIDTH (x), sampled as vec2(t, 0.5)
 	# The Image + texture are allocated once; set_data overwrite keeps a
@@ -398,10 +422,24 @@ func _update_spine(delta: float) -> void:
 	else:
 		_tex.update(_spine_img)
 
+	# Per-station ring frame, baked above: the vertex shader positions rings
+	# AND orients them from this texture, so the tube's frame can never flip
+	# against the spine (the root cause of the "snake jumps onto its own back"
+	# turning bug in 3D).
+	var tbytes := _tan.to_byte_array()
+	if _tan_img == null:
+		_tan_img = Image.create_from_data(RING_COUNT, 1, false, Image.FORMAT_RGBAF, tbytes)
+	else:
+		_tan_img.set_data(RING_COUNT, 1, false, Image.FORMAT_RGBAF, tbytes)
+	if _tan_tex == null:
+		_tan_tex = ImageTexture.create_from_image(_tan_img)
+		_mat.set_shader_parameter(&"u_tan", _tan_tex)
+	else:
+		_tan_tex.update(_tan_img)
+
 	# driving uniforms
 	_mat.set_shader_parameter(&"u_ds", ds)
 	_mat.set_shader_parameter(&"u_len", length)
-	_mat.set_shader_parameter(&"u_motion", motion)
 
 	# collision stations (every `coll_stride`) — kept in WORLD space for the
 	# match's spatial hash; convert back from local by adding the head position.
@@ -527,10 +565,11 @@ func eat_bite() -> void:
 	_bite_hold = 0.11
 	_mouth_open = 1.0
 
-func swallow() -> void:
-	# Called when the fruit actually lands in the mouth (not at first contact):
-	# the visible gulp travels down the neck and the jaw settles.
-	_pulse = 1.0
+func swallow(size: float = 1.0) -> void:
+	# Called when the food actually lands in the mouth (not at first contact):
+	# the visible gulp travels down the neck and the jaw settles. Bigger foods
+	# give a deeper gulp pulse without changing the growth math.
+	_pulse = minf(1.35, 0.85 + 0.30 * size)
 	_lunge = maxf(_lunge, 0.30)
 	gulp_count += 1
 
@@ -870,16 +909,24 @@ func sync_head_params(body_r: float) -> void:
 		head_root.scale = Vector3(s, s, s)
 	# head cap elasticity handled in _update_head
 
-func _update_head(delta: float) -> void:
+func _update_head(delta: float, fresh: bool = false) -> void:
 	var body_r := _body_radius()
 	sync_head_params(body_r)
 
-	# Position & orient the head on the front of the spine.
-	var p0 := Vector3(_spine[0], _spine[1], _spine[2])
-	var p1 := Vector3(_spine[4], _spine[5], _spine[6])
-	var fwd := (p0 - p1)
-	fwd.y = 0.0
-	fwd = fwd.normalized() if fwd.length_squared() > 1e-8 else Vector3(sin(heading), 0, cos(heading))
+	# Position & orient the head on the front of the spine. On half-rate spine
+	# ticks the pose derives from the LIVE heading instead of the stale spine,
+	# so the head never lags its own body around a turn.
+	var p0: Vector3
+	var fwd: Vector3
+	if fresh:
+		p0 = Vector3(0.0, body_lift, 0.0)
+		fwd = Vector3(sin(heading), 0.0, cos(heading))
+	else:
+		p0 = Vector3(_spine[0], _spine[1], _spine[2])
+		var p1 := Vector3(_spine[4], _spine[5], _spine[6])
+		fwd = (p0 - p1)
+		fwd.y = 0.0
+		fwd = fwd.normalized() if fwd.length_squared() > 1e-8 else Vector3(sin(heading), 0, cos(heading))
 	var target_basis := Basis.looking_at(fwd, Vector3.UP)
 	# subtle living head bob & breathing tilt (aligned with the traveling wave)
 	var bob_yaw := sin(wave_phase * 0.5 + wave_phase_off) * 0.05
@@ -891,8 +938,9 @@ func _update_head(delta: float) -> void:
 	# Smooth ROTATION only (scale kept separate — Basis.slerp needs pure rotation).
 	_head_rot = _head_rot.slerp(target_basis, clampf(13.0 * delta, 0.0, 1.0))
 	var s: float = (body_r / 0.56) * 0.82
-	# bank the head into turns (roll around its own forward axis)
-	var hb := _head_rot.rotated(Vector3(0, 0, -1), _lean * 0.35)
+	# bank the head into turns (roll around its own forward axis) — suppressed
+	# in 2D mode for the same reason as the body roll
+	var hb := _head_rot.rotated(Vector3(0, 0, -1), _lean * (0.35 if bank else 0.0))
 	var b := hb.scaled(Vector3(s, s, s))
 	# eat animation: quick forward lunge + jaw snap while the fruit flies in
 	_lunge = maxf(0.0, _lunge - delta * 3.3)

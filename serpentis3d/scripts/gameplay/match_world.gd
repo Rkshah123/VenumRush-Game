@@ -93,6 +93,9 @@ func restyle(dark_v: bool, mode_2d: bool) -> void:
 	for s in snakes:
 		if is_instance_valid(s) and s.alive:
 			s.set_rim(_rim_for())
+			# 2D top-down: no whole-body roll — the straight-down camera reads
+			# a banked tube as the snake squashing flat and popping back up
+			s.bank = gfx_mode == 1
 
 # ------------------------------------------------------------------ lifecycle
 
@@ -203,6 +206,7 @@ func _attach(s: Snake, is_player: bool, start_len: float) -> bool:
 	s.name = "Snake%d" % s.id
 	s.match_world = self
 	s.rim = _rim_for()
+	s.bank = gfx_mode == 1     # 2D mode: no body roll (top-down camera squashes it)
 	s.grounded = true          # ride the arena surface, no vertical bob
 	s.vertical_wave = false
 	add_child(s)

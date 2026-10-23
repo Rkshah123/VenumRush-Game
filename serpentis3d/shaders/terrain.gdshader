@@ -70,16 +70,23 @@ void fragment() {
 	}
 	col *= 0.88 + det;
 	col *= patch_mult;
+	// gentle hue drift on top of the brightness patching: keeps large court
+	// regions from reading as one flat painted slab on any tier
+	col.g += (mottle - 0.5) * 0.035;
+	col.b += (patch_mult - 1.0) * 0.10;
 
-	// Stadium-style diagonal mow bands inside the playable circle — readable
-	// from the fixed top-down camera, soft-edged so they never shimmer.
+	// Stadium-style diagonal mow bands inside the playable circle. A slow sine
+	// warp curves the stripes so they read as gently irregular hay lines
+	// instead of ruler-straight bands, and the tint is kept quiet so the top-
+	// down camera sees organic turf, not a painted pitch.
 	float d_court = length(v_world_pos.xz);
-	float band = 0.5 + 0.5 * cos((v_world_pos.x + v_world_pos.z) * 0.42);
+	float warp = sin(v_world_pos.x * 0.13) * cos(v_world_pos.z * 0.11);
+	float band = 0.5 + 0.5 * cos((v_world_pos.x + v_world_pos.z + 2.4 * warp) * 0.42);
 	float band_w = smoothstep(0.18, 0.35, band) * (1.0 - smoothstep(0.65, 0.82, band));
 	float court_f = (1.0 - smoothstep(u_court_r * 0.94, u_court_r + 2.0, d_court))
 		* smoothstep(2.0, 6.0, d_court);
-	col *= 1.0 + (band_w - 0.5) * 0.17 * court_f;
-	col += band_w * court_f * 0.03;
+	col *= 1.0 + (band_w - 0.5) * 0.135 * court_f;
+	col += band_w * court_f * 0.024;
 	col = clamp(col, vec3(0.02), vec3(0.95));
 
 	ALBEDO = col;
