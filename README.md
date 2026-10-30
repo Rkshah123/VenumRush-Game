@@ -139,10 +139,24 @@ The script exports an unsigned APK, then signs and verifies it with
 `keys/release.keystore` (alias `serpentis`) using the newest Android
 build-tools `apksigner`. Output: `serpentis3d/export/android/VenomRush_signed.apk`.
 
+**Keystore passwords are not stored in this repository.** `export_presets.cfg`
+is committed with empty password fields; the script reads the release password
+from `$env:VENOMRUSH_KS_PASS` or from `serpentis3d/keys/keystore.env`
+(git-ignored), writes it into the preset only while Godot is exporting, and
+restores the original file in a `finally` block. To build, create that file as:
+
+```ini
+VENOMRUSH_KS_PASS=<release keystore password>
+```
+
+Prefer exporting from the GUI? The editor stores whatever you type into the
+keystore dialog back into `export_presets.cfg`, so check
+`git diff serpentis3d/export_presets.cfg` before committing.
+
 Requirements: `ANDROID_HOME` (or `%LOCALAPPDATA%\Android\Sdk`) with
 build-tools installed, and the keystore present in `serpentis3d/keys/`.
-`.gitignore` excludes `keys/`, `export/`, `.godot/` — keystores and build
-outputs are never committed.
+`.gitignore` excludes `keys/`, `export/`, `.godot/` — keystores, local secrets
+and build outputs are never committed.
 
 ---
 
