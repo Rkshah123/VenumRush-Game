@@ -27,6 +27,19 @@ const KIND_RADIUS := [0.3, 0.34, 0.4, 0.35]
 # MultiMesh churn every tick. 200 ≈ targets (119) + massed death drops.
 const HARD_CAP := 200
 const MOBILE_HARD_CAP := 132
+
+## --- S/M/L size tiers -------------------------------------------------------
+## Every real-food orb rolls a tier on spawn: SMALL / MEDIUM / LARGE. The tier
+## multiplies the variant's VISUAL scale, its growth reward and its score
+## TOGETHER, so a large cake always looks like the bigger snack it is and a
+## small egg never feeds more than a golden burger. Kind 3 (power orbs) is
+## exempt — it grants an ability, not mass.
+const TIER_SCALE := [0.80, 1.15, 1.50]   # visual scale of sprite / model
+const TIER_GROW := [0.70, 1.00, 1.75]    # × the kind's growth value
+const TIER_SCORE := [0.7, 1.0, 2.0]      # × the kind's score value
+const TIER_NAMES := ["S", "M", "L"]
+const TIER_WEIGHTS := [0.55, 0.35, 0.10]        # natural court mix (sums to 1)
+const DROP_TIER_WEIGHTS := [0.18, 0.44, 0.38]   # death drops favor meaty tiers
 const FRUIT_TILT := 0.60  # ~34° camera-facing lean: silhouette readable top-down
 const BOB_BASE := [0.34, 0.34, 0.34, 0.52]
 const BOB_AMP := [0.07, 0.07, 0.07, 0.13]
@@ -201,6 +214,38 @@ var _pop_pool: Array = []              # [{node, mesh}] reused round-robin
 var _pop_next := 0
 var _pop_hits := 0
 
+# --- food spatial grid (eat sweep acceleration) ------------------------------
+# eat_hits_sweep used to test EVERY alive orb (~119-200) for EVERY living
+# snake at 30 Hz. Now a coarse grid of passive orbs (rebuilt at ≤6.7 Hz)
+# pre-filters the candidates; the per-orb sweep predicate itself is untouched
+# and still exact. Entries carry [rec, kind, slot, idx]; a buried/flying orb
+# is filtered by the LIVE alive-dict check, so the candidate set never uses
+# stale positions.
+const GRID_CELL := 3.0
+const GRID_OFF := 128   # cell key offset: arena ±56 m → ±20 cells, plenty
+var _grid := {}         # int cell key -> Array of [rec, kind, slot, idx]
+var _grid_ms := -100000
+var _gen := 0           # court mutation counter (spawn/bury/reset)
+var _grid_gen := -1     # generation the grid was built from
+
+func _grid_rebuild() -> void:
+	_grid.clear()
+	for kind in _slots.size():
+		for s: Dictionary in _slots[kind]:
+			var alive: Dictionary = s["alive"]
+			for idx in alive.keys():
+				var rec: Dictionary = alive[idx]
+				if rec.has("fly"):
+					continue
+				var p: Vector3 = rec["pos"]
+				var key := (int(floor(p.x / GRID_CELL)) + GRID_OFF) * 512 \
+					+ (int(floor(p.z / GRID_CELL)) + GRID_OFF)
+				if not _grid.has(key):
+					_grid[key] = []
+				(_grid[key] as Array).append([rec, kind, s, idx])
+	_grid_ms = Time.get_ticks_msec()
+	_grid_gen = _gen
+
 # ---------------------------------------------------------------- lifecycle
 
 var hard_cap := HARD_CAP   # effective budget; phones run a leaner one
@@ -267,6 +312,10 @@ func _variant_mesh(kind: int, cfg: Dictionary) -> Mesh:
 		return _power_mesh()
 	if mode_2d and cfg.has("sprite"):
 		var size := float(cfg.get("size", float(cfg.get("h", 0.9))))
+		# 2D icons render at ×1.5: the flat sprite reads far too small next to
+		# the chunky snake bodies under the fixed top-down camera, even though
+		# the 3D model of the same food reads fine at its natural scale.
+		size *= 1.5
 		return _sprite_mesh(String(cfg["sprite"]), size, kind)
 	return _real_fruit_mesh(kind, cfg)
 
@@ -314,6 +363,9 @@ func reset() -> void:
 				free.append(int(idx))
 			alive.clear()
 	_total = 0
+	_gen += 1
+	_grid.clear()   # no stale rec references may survive a court reset
+	_grid_ms = -100000
 	_deficit = []
 	_deficit.resize(_targets.size())
 	for kind in _targets.size():
@@ -348,8 +400,12 @@ func debug_state() -> String:
 
 # ---------------------------------------------------------------- spawn/remove
 
-func drop_orb(kind: int, pos: Vector3) -> void:
-	if _total >= hard_cap:
+func drop_orb(kind: int, pos: Vector3, heads: Array = []) -> void:
+	# Death drops ALWAYS appear: when the court sits at the hard cap, retire
+	# one passive orb far from every living head (basic first → rare → golden)
+	# and give its slot to the fresh drop. The old version silently dropped
+	# nothing exactly when the court was busiest — a pile-up death.
+	if _total >= hard_cap and not _evict_for_drop(heads):
 		return
 	# Death drops originate on a body station: keep them inside the playable
 	# disc and push them out of boulders/trees. A food hidden INSIDE a rock is
@@ -366,7 +422,45 @@ func drop_orb(kind: int, pos: Vector3) -> void:
 		drop_ok = _clear_of_obstacles(p, r)
 	if not drop_ok:
 		return
-	_spawn_orb(kind, p)
+	_spawn_orb(kind, p, DROP_TIER_WEIGHTS)
+
+## Free one court slot for a death drop: retire the FARTHEST passive orb of
+## the lowest kinds first (small snacks go before golden loot), and never an
+## orb close to a living head (that food is still playable). `heads` = living
+## snakes' head positions.
+func _evict_for_drop(heads: Array) -> bool:
+	for kind in [0, 1, 2]:
+		var best_s: Dictionary = {}
+		var best_idx := -1
+		var best_d := 2.0        # drop-clearance floor: nothing closer qualifies
+		for s: Dictionary in _slots[kind]:
+			var alive: Dictionary = s["alive"]
+			for idx in alive.keys():
+				var rec: Dictionary = alive[idx]
+				if rec.has("fly"):
+					continue
+				var p: Vector3 = rec["pos"]
+				var dmin := INF
+				for h in heads:
+					dmin = minf(dmin, p.distance_to(h))
+				if dmin > best_d:
+					best_d = dmin
+					best_s = s
+					best_idx = idx
+		if best_idx >= 0:
+			_bury_idx(best_s, best_idx, kind)
+			return true
+	return false
+
+## Weighted tier roll from a weights array (entries sum to 1.0).
+func _pick_tier(weights: Array) -> int:
+	var roll := randf()
+	var acc := 0.0
+	for i in weights.size():
+		acc += float(weights[i])
+		if roll <= acc:
+			return i
+	return 1
 
 ## Weighted pick among variants that still have a free instance. The old pick
 ## could land on a full pool and silently lose the respawn entirely.
@@ -388,7 +482,7 @@ func _pick_variant(kind: int, pools: Array) -> int:
 			return i
 	return -1
 
-func _spawn_orb(kind: int, at: Vector3 = Vector3.INF) -> bool:
+func _spawn_orb(kind: int, at: Vector3 = Vector3.INF, tier_w: Array = TIER_WEIGHTS) -> bool:
 	if _total >= hard_cap:
 		return false
 	var pools: Array = _slots[kind]
@@ -410,10 +504,23 @@ func _spawn_orb(kind: int, at: Vector3 = Vector3.INF) -> bool:
 		if not _clear_of_obstacles(pos, r) or pos.length() > arena_radius - 2.0:
 			return false
 	var idx: int = free.pop_back()
-	(s["alive"] as Dictionary)[idx] = {
+	var rec := {
 		"pos": pos, "phase": randf() * TAU, "kind": kind, "born": t_now(),
-		"size": float(VAR_TABLE[kind][vi].get("size", float(VAR_TABLE[kind][vi].get("h", 0.9)))),}
+		"size": float(VAR_TABLE[kind][vi].get("size", float(VAR_TABLE[kind][vi].get("h", 0.9)))),
+	}
+	if kind < 3:
+		# roll the S/M/L tier: visual scale, growth and score move TOGETHER so
+		# the reward always matches what the orb visibly is
+		var tier := _pick_tier(tier_w)
+		var tscale: float = TIER_SCALE[tier]
+		rec["tier"] = tier
+		rec["scale"] = tscale
+		rec["growth"] = float(KIND_GROWTH[kind]) * float(TIER_GROW[tier])
+		rec["score"] = int(round(float(KIND_SCORE[kind]) * float(TIER_SCORE[tier])))
+		rec["size"] = float(rec["size"]) * tscale
+	(s["alive"] as Dictionary)[idx] = rec
 	_total += 1
+	_gen += 1
 	return true
 
 ## Random disc sampling with a guaranteed-clear fallback scan. A rejected
@@ -503,23 +610,43 @@ func alive_positions() -> Array:
 ## it visibly crosses. Returns the actual pool records: MatchWorld hands them
 ## straight back to fly_rec(), so there is no position lookup that could pick
 ## the wrong orb or double-count one. Reach scales with each variant's OWN
-## collect radius, so big burgers are gatherable around their full footprint
-## and tiny eggs still need a real mouth contact.
+## collect radius (and an orb's S/M/L tier scale), so big burgers are
+## gatherable around their full footprint and tiny eggs still need a real
+## mouth contact. A coarse spatial grid pre-filters candidates (O(court) scan
+## → only nearby cells); every surviving candidate is then tested with the
+## EXACT same swept-distance predicate as before, and validated against the
+## live pool, so the result set is identical.
 func eat_hits_sweep(from: Vector3, to: Vector3, reach: float) -> Array:
+	if Time.get_ticks_msec() - _grid_ms > 150 or _gen != _grid_gen:
+		_grid_rebuild()
 	var out: Array = []
 	var sx := to.x - from.x
 	var sz := to.z - from.z
 	var seg_len2 := sx * sx + sz * sz
-	for kind in _slots.size():
-		for s: Dictionary in _slots[kind]:
-			var alive: Dictionary = s["alive"]
-			var rr: float = reach + float(kind) * 0.03 + float(s["r"]) * 0.5
-			var rr2 := rr * rr
-			for idx in alive.keys():
-				var rec: Dictionary = alive[idx]
-				if rec.has("fly"):
+	# padded AABB of the segment in cell space: orbs in these cells can be
+	# within reach; everything outside this box can never pass the test
+	var pad := reach + 0.85
+	var cx0 := int(floor((minf(from.x, to.x) - pad) / GRID_CELL))
+	var cx1 := int(floor((maxf(from.x, to.x) + pad) / GRID_CELL))
+	var cz0 := int(floor((minf(from.z, to.z) - pad) / GRID_CELL))
+	var cz1 := int(floor((maxf(from.z, to.z) + pad) / GRID_CELL))
+	for cx in range(cx0, cx1 + 1):
+		for cz in range(cz0, cz1 + 1):
+			var cell: Array = _grid.get((cx + GRID_OFF) * 512 + (cz + GRID_OFF), [])
+			for cand in cell:
+				var rec: Dictionary = cand[0]
+				var kind: int = cand[1]
+				var s: Dictionary = cand[2]
+				# live validation: bury/bury-flight between rebuilds must not
+				# resurrect a claimed orb; identity match also guards against
+				# a slot idx being RECYCLED to a new orb between rebuilds
+				if rec.has("fly") or (s["alive"] as Dictionary).get(cand[3]) != rec:
 					continue
 				var p: Vector3 = rec["pos"]
+				var sr: float = float(s["r"])
+				var rr: float = reach + float(kind) * 0.03 + sr * 0.5 \
+					+ (float(rec.get("scale", 1.0)) - 1.0) * sr * 0.5
+				var rr2 := rr * rr
 				var qx := from.x
 				var qz := from.z
 				if seg_len2 > 0.000001:
@@ -575,6 +702,7 @@ func _bury_idx(s: Dictionary, idx: int, kind: int) -> void:
 	free.append(int(idx))
 	_total -= 1
 	_deficit[kind] += 1
+	_gen += 1
 
 func _bury() -> Transform3D:
 	return Transform3D(Basis().scaled(Vector3(0.001, 0.001, 0.001)), Vector3(0.0, -50.0, 0.0))
@@ -632,7 +760,7 @@ func _process(delta: float) -> void:
 					p += Vector3.UP * (0.28 * sin(q * PI))
 					var yaw := q * 5.0 + float(rec["phase"])
 					# hold full size while it is visibly flying, shrink into the jaws
-					var sc := 1.0 - 0.92 * smoothstep(0.55, 1.0, q)
+					var sc := float(rec.get("scale", 1.0)) * (1.0 - 0.92 * smoothstep(0.55, 1.0, q))
 					mm.set_instance_transform(idx, Transform3D(
 						Basis(Vector3.UP, yaw).scaled(Vector3(sc, sc, sc)), p))
 					if q >= 1.0:
@@ -647,7 +775,9 @@ func _process(delta: float) -> void:
 				var ph: float = rec["phase"]
 				var p: Vector3 = rec["pos"]
 				var yaw := sin(t * 0.7 + ph) * 0.28 + (t * 2.2 if kind == 3 else 0.0)
-				var sc := 1.0
+				# S/M/L tier scale: the orb's real size lives here, on top of
+				# the variant mesh's own baked scale
+				var sc := float(rec.get("scale", 1.0))
 				var age: float = t - float(rec.get("born", t))
 				# spawn pop-in: elastic scale-up over the first 0.3 s (spec §4)
 				var yy: float
@@ -658,7 +788,7 @@ func _process(delta: float) -> void:
 					yy = 0.0
 					if age < 0.3:
 						var k := age / 0.3
-						sc = 1.0 + 0.45 * sin(k * PI) * (1.0 - k) - 0.45 * k * (1.0 - k)
+						sc += sc * 0.45 * sin(k * PI) * (1.0 - k) - sc * 0.45 * k * (1.0 - k)
 						sc = maxf(sc, 0.05)
 					var vis := p + Vector3(0.0, 0.16, 0.0)
 					rec["vis"] = vis
@@ -680,7 +810,7 @@ func basis3d(p: Vector3, kind: int, ph: float, yaw: float, sc: float, age: float
 	var yy: float = BOB_BASE[kind] + sin(t * BOB_SPD[kind] + ph) * BOB_AMP[kind]
 	if age < 0.3:
 		var k := age / 0.3
-		sc = 1.0 + 0.45 * sin(k * PI) * (1.0 - k) - 0.45 * k * (1.0 - k)
+		sc += sc * 0.45 * sin(k * PI) * (1.0 - k) - sc * 0.45 * k * (1.0 - k)
 		sc = maxf(sc, 0.05)
 		yy -= 0.5 * (1.0 - k)
 	var basis: Basis

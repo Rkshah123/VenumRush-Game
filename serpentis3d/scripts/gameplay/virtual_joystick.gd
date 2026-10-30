@@ -215,8 +215,10 @@ func _draw() -> void:
 	var a := _alpha * breathe
 	var accent := UiTheme.c("accent")
 	var ring := Color(accent.r, accent.g, accent.b, 0.55 * a)
-	var inner := Color(0.03, 0.05, 0.09, 0.24 * a) if UiTheme.is_dark() \
-		else Color(0.96, 0.91, 0.82, 0.34 * a)
+	# the resting disc resolves through the theme palette so both palettes
+	# (BEIGE / DARK) get the right tone with zero hardcoded literals
+	var pb := UiTheme.c("panel_bg")
+	var inner := Color(pb.r, pb.g, pb.b, (0.24 if UiTheme.is_dark() else 0.34) * a)
 	# translucent disc + thin ring outline (stays out of the way of the board)
 	draw_circle(c, r, inner)
 	draw_arc(c, r, 0.0, TAU, 56, ring, maxf(2.0, 2.6 * ui_scale), true)

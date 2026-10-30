@@ -17,6 +17,7 @@ var live := true            # false while paused / on menus
 var _food: PackedVector3Array = PackedVector3Array()
 var _snakes: Array = []     # [[pos: Vector3, color: Color], ...]
 var _player_pos := Vector3.ZERO
+var _player_head := 0.0     # steering angle, for the heading pointer
 var _player_col := Color(0.2, 0.95, 0.85)
 var _has_player := false
 var _refresh_t := 0.0
@@ -72,6 +73,7 @@ func _refresh() -> void:
 		c = c.lightened(0.18)
 		if s == pl:
 			_player_pos = s.head_pos
+			_player_head = s.heading
 			_player_col = c
 			_has_player = true
 		else:
@@ -90,8 +92,9 @@ func _draw() -> void:
 	sb.set_corner_radius_all(int(6 * ui_scale))
 	draw_style_box(sb, panel)
 	var half := size * 0.5
-	# playable circle
-	draw_arc(half, half.x - 5.0, 0.0, TAU, 48, UiTheme.with_alpha("dim", 0.30 * a), 1.5, true)
+	# playable circle: slightly stronger than a hairline so the ring reads as
+	# the arena boundary at a glance
+	draw_arc(half, half.x - 5.0, 0.0, TAU, 48, UiTheme.with_alpha("dim", 0.45 * a), 2.0, true)
 	# fruit: quiet dots (they read as "supplies", not clutter)
 	for p in _food:
 		draw_circle(_to_panel(p), maxf(1.4, 2.1 * ui_scale), UiTheme.with_alpha("gold", 0.55 * a))
@@ -102,6 +105,15 @@ func _draw() -> void:
 	if _has_player:
 		var pp := _to_panel(_player_pos)
 		var pulse := 0.5 + 0.5 * sin(_t * 4.0)
+		# heading pointer: a small needle from the dot toward the steering
+		# direction, so rivals can be outmaneuvered without watching the road
+		var hd := Vector2(sin(_player_head), cos(_player_head))
+		var tip := pp + hd * (maxf(7.5, 11.0 * ui_scale) + pulse * 2.0)
+		var side := hd.orthogonal()
+		var base := pp + hd * maxf(3.0, 4.4 * ui_scale)
+		var hl := maxf(2.4, 3.6 * ui_scale)
+		draw_colored_polygon(PackedVector2Array([tip, base + side * hl, base - side * hl]),
+			Color(_player_col.r, _player_col.g, _player_col.b, 0.95 * a))
 		draw_circle(pp, maxf(5.0, 7.5 * ui_scale) + pulse * 2.0, Color(_player_col.r, _player_col.g, _player_col.b, 0.22 * a))
 		draw_circle(pp, maxf(3.0, 4.2 * ui_scale), Color(_player_col.r, _player_col.g, _player_col.b, 0.95 * a))
 		draw_arc(pp, maxf(5.0, 7.0 * ui_scale) + pulse * 2.5, 0.0, TAU, 24,

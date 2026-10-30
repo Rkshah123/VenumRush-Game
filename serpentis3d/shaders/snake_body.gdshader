@@ -14,8 +14,8 @@ render_mode cull_disabled, diffuse_lambert, specular_schlick_ggx;
 
 uniform sampler2D u_spine : filter_linear, repeat_disable;
 uniform sampler2D u_tan : filter_linear, repeat_disable; // per-station CPU-smoothed tangent
-uniform float u_texel = 0.0026041667; // 1 / RING_COUNT (keep in sync with GDScript)
-uniform float u_rings = 384.0;
+uniform float u_texel = 0.0038910506;   // 1 / RING_COUNT (keep in sync with GDScript)
+uniform float u_rings = 257.0;
 uniform float u_ds = 0.026;           // meters per station (updated per frame)
 uniform float u_len = 10.0;           // body length in meters
 uniform vec4 u_dorsal = vec4(0.05, 0.5, 0.42, 1.0);
@@ -34,6 +34,8 @@ uniform float u_rim = 0.0;             // fresnel edge light — keeps snakes
 uniform float u_bank = 0.0;           // progressive bank: ring roll = u_bank · t
                                       // (head upright → tail rolled into turns)
 uniform float u_dbg = 0.0;            // dev: flat ribbon diagnostic (bypasses spine texture)
+uniform float u_fake_depth = 0.0;     // 2D top-down: shift the tube up-screen by its climb height
+uniform float u_rest_lift = 0.30;     // resting spine lift (body_radius*0.86+0.02) — kept visually neutral
 
 varying vec3 v_axis;
 
@@ -93,6 +95,21 @@ void vertex() {
 
 		// Slightly flattened cross-section (real snake bodies are not perfect cylinders)
 		VERTEX = P + S * cs * r + U * sn * r * 0.86;
+
+		// --- 2D FAKE DEPTH (top-down mode only, u_fake_depth = 1.0) ---
+		// The 2D camera is orthographic straight down, so world-Y (climb
+		// height on a boulder) projects to NOTHING on screen — the snake
+		// appears to pass through the stone. P.y above the resting lift IS
+		// the climb height, so shift the tube along local -Z (which the 2D
+		// camera maps to up-screen) by exactly that amount: the body then
+		// visibly rides OVER the stone instead of through it. The resting
+		// lift is excluded so the flat-court look stays pixel-identical.
+		// Slight thickening with height sells the "closer to camera" read.
+		float climb = max(P.y - u_rest_lift, 0.0);
+		if (u_fake_depth > 0.5) {
+			r *= 1.0 + 0.10 * clamp(climb * 0.5, 0.0, 1.0);
+			VERTEX = P + S * cs * r + U * sn * r * 0.86 - vec3(0.0, 0.0, climb);
+		}
 		NORMAL = normalize(S * cs + U * sn * 1.16);
 	}
 }

@@ -8,7 +8,17 @@ extends Snake
 
 var _keys_dir := Vector2.ZERO   # WASD/arrows, screen space (x right, y up)
 var _keys_held := {}            # keycode -> true (avoids press/release cancels)
+var _key_mode := false          # desktop: keys OWN steering until the next key
 var autopilot := false        # dev autoplay: seek food, avoid walls, live long
+
+# autopilot anti-loop watchdog (QA harness only — real players never steer here)
+var _ap_loop_t := 0.0
+var _ap_loop_x := Vector3.INF
+var _ap_loop_turn := 0.0
+var _ap_loop_h := 0.0
+var _ap_kick := 0.0
+var _ap_kick_sign := 1.0
+var ap_loops := 0             # QA counter
 
 # --- touch state (mobile) ---
 var touch_sim := false        # dev --touch-test: force the touch code path on desktop
@@ -87,7 +97,7 @@ func _steer_offset_from(p: Vector2, cam: Camera3D) -> Vector2:
 
 func _steer(delta: float) -> void:
 	if autopilot:
-		_autopilot_steer()
+		_autopilot_steer(delta)
 		return
 	var cam := get_viewport().get_camera_3d()
 	var keys := _keys_dir
@@ -119,6 +129,14 @@ func _steer(delta: float) -> void:
 		return
 
 	# --- desktop (or a keyboard on a phone): pointer OR direction keys ---
+	# KEYBOARD PERSISTENCE (desktop fix): once a direction key is used, keys
+	# OWN the steering — releasing the key keeps the snake crawling in the
+	# chosen direction until ANOTHER direction key is pressed. Before this
+	# fix, releasing a key fell through to the mouse-pointer branch, so the
+	# snake snapped back toward wherever the cursor was ("moved briefly, then
+	# crawled straight again"). The mouse still steers if it is used BEFORE
+	# any key; a key press always takes priority from then on. Mobile touch
+	# steering is untouched (its own branch above).
 	var desired := Vector3.ZERO
 	var off := Vector2.ZERO
 	if cam and not keyboard_only:
@@ -128,10 +146,13 @@ func _steer(delta: float) -> void:
 	# yaw offset - that made the snake circle forever). W/Up = up-screen,
 	# S/Down = down-screen, A/Left = left, D/Right = right.
 	if keys != Vector2.ZERO:
+		_key_mode = true
 		if cam:
 			desired = _screen_offset_to_dir(Vector2(keys.x, -keys.y) * 0.5, cam)
 		else:
 			desired = Vector3(keys.x, 0.0, -keys.y)
+	elif _key_mode:
+		pass   # persist the last chosen direction — desired_dir stays as-is
 	elif cam and off != Vector2.ZERO:
 		desired = _screen_offset_to_dir(off, cam)
 
@@ -191,6 +212,12 @@ func press_key(code: int, down: bool = true) -> void:
 func clear_keys() -> void:
 	_keys_held.clear()
 	_keys_dir = Vector2.ZERO
+	_key_mode = false          # dev harness / respawn: steering ownership resets
+
+func spawn(pos: Vector3, dir: Vector3, body_len: float) -> void:
+	# fresh life: the last life's key direction must not leak into this one
+	_key_mode = false
+	super.spawn(pos, dir, body_len)
 
 func _idle_drift_dir(delta: float) -> Vector3:
 	# Wide, gentle arc that mostly follows the spawn flow (everyone slides
@@ -228,7 +255,7 @@ func _screen_offset_to_dir(off: Vector2, cam: Camera3D) -> Vector3:
 	d.y = 0.0
 	return d.normalized() if d.length_squared() > 0.9 else d
 
-func _autopilot_steer() -> void:
+func _autopilot_steer(delta: float) -> void:
 	# Dev-brain for automated QA runs: nearest food, wall urgency, gentle rallies.
 	var desired := Vector3.ZERO
 	if match_world != null:
@@ -268,5 +295,35 @@ func _autopilot_steer() -> void:
 		if desired.length_squared() < 0.01:
 			var fwd := Vector3(sin(heading), 0.0, cos(heading))
 			desired = fwd.rotated(Vector3.UP, 0.1)
+		_input_loop_guard(delta, desired)
+		if _ap_kick > 0.0:
+			_ap_kick -= delta
+			var fwd := Vector3(sin(heading), 0.0, cos(heading))
+			desired = fwd.rotated(Vector3.UP, _ap_kick_sign * 1.15) * 1.5 + desired * 0.4
 		input_boost = false
 		desired_dir = Vector3(desired.x, 0.0, desired.z).normalized()
+
+## Same anti-orbit cure as AISnake, for the QA autopilot brain only.
+func _input_loop_guard(delta: float, desired: Vector3) -> void:
+	if _ap_loop_x == Vector3.INF:
+		_ap_loop_x = head_pos
+		_ap_loop_h = heading
+		return
+	_ap_loop_t += delta
+	_ap_loop_turn += absf(wrapf(heading - _ap_loop_h, -PI, PI))
+	_ap_loop_h = heading
+	if _ap_loop_t < 3.0:
+		return
+	var moved := head_pos.distance_to(_ap_loop_x)
+	var expected := maxf(speed_cur, base_speed()) * _ap_loop_t
+	var spinning := _ap_loop_turn > TAU * 0.75
+	var beached := moved < expected * 0.12
+	_ap_loop_t = 0.0
+	_ap_loop_x = head_pos
+	_ap_loop_turn = 0.0
+	if _ap_kick > 0.0:
+		return
+	if (spinning and moved < expected * 0.35) or beached:
+		_ap_kick = 1.6
+		_ap_kick_sign = 1.0 if randf() < 0.5 else -1.0
+		ap_loops += 1

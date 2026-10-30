@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title></title>
+<style>
+  :root { color-scheme: dark; background:#030408; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; width:100%; height:100%; overflow:hidden; background:#030408; }
+  body { position:fixed; inset:0; }
+  #world { position:absolute; inset:0; overflow:hidden; isolation:isolate; background:
+    radial-gradient(ellipse at 22% 38%,rgba(0,72,180,.25),transparent 44%),
+    radial-gradient(ellipse at 82% 39%,rgba(255,111,0,.24),transparent 43%),
+    linear-gradient(180deg,#050711 0%,#11111a 48%,#090609 100%); }
+  canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  #sky { z-index:0; }
+  .storm { position:absolute; inset:-15%; z-index:1; opacity:.34; pointer-events:none;
+    background:
+      radial-gradient(ellipse at 18% 34%,rgba(25,73,142,.36),transparent 34%),
+      radial-gradient(ellipse at 76% 31%,rgba(184,76,18,.32),transparent 33%),
+      radial-gradient(ellipse at 48% 50%,rgba(10,10,20,.75),transparent 48%);
+    filter:blur(24px); animation:stormDrift 17s ease-in-out infinite alternate; }
+  .clouds { position:absolute; inset:-20%; z-index:2; pointer-events:none; opacity:.27;
+    background:repeating-radial-gradient(ellipse at 50% 55%,transparent 0 8%,rgba(110,115,140,.11) 10%,transparent 16%);
+    filter:blur(22px); animation:cloudRoll 44s linear infinite; }
+  #snakes { position:absolute; inset:0; z-index:3; overflow:hidden; pointer-events:none; }
+  .snake-clip { position:absolute; overflow:hidden; opacity:0; transition:opacity 1.4s ease; }
+  .snake-clip.ready { opacity:1; }
+  .snake-clip video { width:100%; height:100%; object-fit:cover; display:block; }
+  .snake-clip.black { filter:grayscale(1) brightness(.34) contrast(1.6) sepia(.1) hue-rotate(175deg) saturate(1.5);
+    mask-image:linear-gradient(90deg,#000 0%,#000 72%,transparent 100%); }
+  .snake-clip.gold { filter:sepia(1) saturate(4.5) hue-rotate(350deg) brightness(1.13) contrast(1.2);
+    mask-image:linear-gradient(270deg,#000 0%,#000 72%,transparent 100%); }
+  .snake-clip video { mix-blend-mode:screen; }
+  #ground { position:absolute; z-index:4; inset:46% 0 0; pointer-events:none;
+    background:linear-gradient(180deg,rgba(5,5,9,0) 0%,rgba(4,3,5,.6) 18%,rgba(1,1,2,.95) 100%); }
+  #ground::before { content:"";position:absolute;inset:10% -10% -10%;
+    background:repeating-linear-gradient(174deg,transparent 0 29px,rgba(255,106,22,.045) 30px,transparent 32px),
+    radial-gradient(ellipse at 50% 10%,rgba(255,129,21,.2),transparent 48%);
+    transform:perspective(300px) rotateX(8deg); }
+  #vignette { position:absolute; z-index:8; inset:0; pointer-events:none; background:
+    radial-gradient(ellipse at center,transparent 34%,rgba(0,0,0,.28) 72%,rgba(0,0,0,.82) 130%),
+    linear-gradient(90deg,rgba(0,0,0,.22),transparent 20%,transparent 80%,rgba(0,0,0,.22)); }
+  #flash { position:absolute;z-index:7;inset:0;opacity:0;pointer-events:none;background:#fff;mix-blend-mode:screen; }
+  @keyframes stormDrift { from{transform:translate3d(-2%,1%,0) scale(1)} to{transform:translate3d(3%,-2%,0) scale(1.12)} }
+  @keyframes cloudRoll { from{transform:translate3d(-5%,2%,0) rotate(0deg)} to{transform:translate3d(5%,-3%,0) rotate(8deg)} }
+  @media (prefers-reduced-motion:reduce) {
+    .storm,.clouds { animation:none; }
+    .snake-clip { transition:none; }
+  }
+</style>
+</head>
+<body>
+<div id="world" aria-hidden="true">
+  <canvas id="sky"></canvas>
+  <div class="storm"></div><div class="clouds"></div>
+  <div id="snakes">
+    <!--
+      Genuine animal footage is intentionally used instead of drawn snake substitutes.
+      Place freely licensed, genuine snake/cobra MP4 clips beside this HTML file:
+      black-snake.mp4 and golden-snake.mp4. Pixabay's free snake footage library:
+      https://pixabay.com/videos/search/cobra%20snake/
+      Pexels' free snake footage library:
+      https://www.pexels.com/search/videos/snake/
+      Use footage whose license permits your intended use. Gold is a color grade of
+      real footage, not a claim that the animal itself is metallic gold. Missing videos
+      simply remain invisible; environmental animation continues without crashing.
+    -->
+    <div class="snake-clip black" style="left:-4%;top:12%;width:63%;height:77%">
+      <video data-src="black-snake.mp4" muted autoplay loop playsinline preload="auto"></video>
+    </div>
+    <div class="snake-clip black" style="left:0;top:38%;width:53%;height:64%;opacity:.55;transform:scaleX(-1)">
+      <video data-src="black-snake.mp4" muted autoplay loop playsinline preload="auto"></video>
+    </div>
+    <div class="snake-clip gold" style="right:-4%;top:10%;width:63%;height:79%">
+      <video data-src="golden-snake.mp4" muted autoplay loop playsinline preload="auto"></video>
+    </div>
+    <div class="snake-clip gold" style="right:0;top:40%;width:53%;height:62%;opacity:.55;transform:scaleX(-1)">
+      <video data-src="golden-snake.mp4" muted autoplay loop playsinline preload="auto"></video>
+    </div>
+  </div>
+  <canvas id="fx"></canvas>
+  <div id="ground"></div>
+  <div id="flash"></div>
+  <div id="vignette"></div>
+</div>
+<script>
+(() => {
+  'use strict';
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const world = document.getElementById('world');
+  const sky = document.getElementById('sky'), fx = document.getElementById('fx');
+  const sctx = sky.getContext('2d', {alpha:true}), ctx = fx.getContext('2d', {alpha:true});
+  const flash = document.getElementById('flash');
+  const videoLayers = [...document.querySelectorAll('.snake-clip')];
+  document.querySelectorAll('video[data-src]').forEach(v => {
+    v.src = v.dataset.src;
+    v.addEventListener('playing', () => v.closest('.snake-clip').classList.add('ready'));
+    v.addEventListener('error', () => v.closest('.snake-clip').classList.remove('ready'));
+    v.play().catch(() => {});
+  });
+
+  let w=0,h=0,dpr=1, raf=0, last=0, elapsed=0, lightningAt=0, lightning=null, flashAlpha=0;
+  const rand=(a,b)=>a+Math.random()*(b-a);
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const particles=[], smoke=[], arcs=[], cracks=[];
+  function resize(){
+    dpr=Math.min(devicePixelRatio||1,1.7); w=innerWidth; h=innerHeight;
+    for(const c of [sky,fx]) { c.width=Math.round(w*dpr);c.height=Math.round(h*dpr);c.style.width=w+'px';c.style.height=h+'px'; }
+    sctx.setTransform(dpr,0,0,dpr,0,0);ctx.setTransform(dpr,0,0,dpr,0,0);
+    const count=Math.min(520,Math.round(w*h/2500));
+    while(particles.length<count) particles.push(newParticle(true));
+    while(particles.length>count) particles.pop();
+    while(smoke.length<42) smoke.push(newSmoke(true));
+    while(cracks.length<26) cracks.push(newCrack());
+  }
+  function newParticle(initial=false){
+    const side=Math.random()<.5?'blue':'fire';
+    return {x:rand(0,w||1000),y:initial?rand(0,h||700):rand(h*.48,h+30),vx:rand(-.45,.45),vy:rand(-1.8,-.25),
+      size:rand(.5,3.1),life:rand(1.4,6),age:initial?rand(0,5):0,side,tw:rand(0,8),seed:rand(0,100)};
+  }
+  function newSmoke(initial=false){return {x:rand(-80,w+80),y:initial?rand(h*.25,h+50):h+rand(0,80),r:rand(40,160),vx:rand(-.45,.45),vy:rand(-.7,-.15),a:rand(.018,.075),side:Math.random()<.5?-1:1};}
+  function newCrack(){return {x:rand(w*.05,w*.95),y:rand(h*.67,h*1.03),len:rand(25,145),phase:rand(0,7),side:Math.random()<.5?'blue':'fire'};}
+  function bolt(x1,y1,x2,y2,depth=0){
+    const pts=[{x:x1,y:y1}], n=Math.max(5,Math.floor(Math.hypot(x2-x1,y2-y1)/22));
+    for(let i=1;i<n;i++){const t=i/n;pts.push({x:x1+(x2-x1)*t+rand(-24,24),y:y1+(y2-y1)*t+rand(-8,8)});}
+    pts.push({x:x2,y:y2});return {pts,life:rand(.08,.22),max:.22,branches:depth<2&&Math.random()<.8?[bolt(pts[Math.floor(n*.45)].x,pts[Math.floor(n*.45)].y,rand(0,w*.48),rand(h*.1,h*.6),depth+1)]:[]};
+  }
+  function drawBolt(b,alpha){
+    ctx.save();ctx.globalAlpha=alpha;ctx.lineJoin='round';ctx.lineCap='round';
+    ctx.strokeStyle='#b9e8ff';ctx.shadowColor='#3d9dff';ctx.shadowBlur=24;ctx.lineWidth=2.4;
+    ctx.beginPath();b.pts.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.stroke();
+    ctx.strokeStyle='#fff';ctx.shadowBlur=5;ctx.lineWidth=.7;ctx.stroke();
+    b.branches.forEach(q=>drawBolt(q,alpha*.72));ctx.restore();
+  }
+  function startLightning(){
+    const fromLeft=Math.random()<.5,x=fromLeft?rand(0,w*.45):rand(w*.55,w);
+    lightning=bolt(x,rand(-30,h*.08),x+rand(-w*.22,w*.22),rand(h*.36,h*.7));
+    lightningAt=elapsed+rand(.35,1.8);flashAlpha=rand(.08,.24);
+  }
+  function drawGround(t){
+    const horizon=h*.59;
+    const grad=ctx.createLinearGradient(0,horizon,0,h);
+    grad.addColorStop(0,'rgba(7,8,16,0)');grad.addColorStop(.4,'rgba(9,5,7,.26)');grad.addColorStop(1,'rgba(0,0,0,.84)');
+    ctx.fillStyle=grad;ctx.fillRect(0,horizon,w,h-horizon);
+    // Ground fissures with individually drifting glow.
+    cracks.forEach(c=>{
+      const pulse=.28+.72*(.5+.5*Math.sin(t*1.8+c.phase));
+      ctx.save();ctx.globalAlpha=pulse*.65;ctx.strokeStyle=c.side==='blue'?'#178aff':'#ff5a13';
+      ctx.shadowColor=ctx.strokeStyle;ctx.shadowBlur=9;ctx.lineWidth=rand(.6,1.4);
+      ctx.beginPath();let x=c.x,y=c.y;ctx.moveTo(x,y);
+      for(let i=0;i<5;i++){x+=rand(-c.len/5,c.len/5);y-=rand(3,13);ctx.lineTo(x,y);}
+      ctx.stroke();ctx.restore();
+    });
+    // Energy arcs race across the ground toward the center.
+    if(Math.random()<.11 && arcs.length<18) arcs.push({x:Math.random()<.5?rand(0,w*.25):rand(w*.75,w),y:rand(h*.66,h*.94),life:.42,max:.42,dir:Math.random()<.5?1:-1});
+    arcs.forEach(a=>{
+      a.life-=.016;a.x+=a.dir*(w*.72)*(1/60);
+      const alpha=clamp(a.life/a.max,0,1);
+      ctx.save();ctx.globalAlpha=alpha*.9;ctx.strokeStyle=a.dir>0?'#58baff':'#ffae39';ctx.shadowColor=ctx.strokeStyle;ctx.shadowBlur=15;ctx.lineWidth=2;
+      ctx.beginPath();ctx.moveTo(a.x,a.y);for(let i=1;i<9;i++)ctx.lineTo(a.x+i*8,a.y+Math.sin(t*22+i*2)*rand(2,10));ctx.stroke();ctx.restore();
+    });
+    for(let i=arcs.length-1;i>=0;i--)if(arcs[i].life<=0||arcs[i].x< -100||arcs[i].x>w+100)arcs.splice(i,1);
+  }
+  function drawSmoke(dt){
+    smoke.forEach(s=>{
+      s.x+=s.vx*dt*35;s.y+=s.vy*dt*35;s.r+=dt*3;
+      if(s.y<-s.r||s.x<-s.r*2||s.x>w+s.r*2)Object.assign(s,newSmoke());
+      const g=ctx.createRadialGradient(s.x,s.y,0,s.x,s.y,s.r);
+      const col=s.side<0?'75,125,190':'190,83,33';
+      g.addColorStop(0,`rgba(${col},${s.a})`);g.addColorStop(1,`rgba(${col},0)`);
+      ctx.fillStyle=g;ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,Math.PI*2);ctx.fill();
+    });
+  }
+  function drawParticles(dt,t){
+    particles.forEach(p=>{
+      p.age+=dt;p.x+=p.vx*dt*60;p.y+=p.vy*dt*60+Math.sin(t*2+p.seed)*.22;
+      const cx=w*.5, pull=(p.x<cx?1:-1);
+      if(Math.random()<.08)p.x+=(cx-p.x)*.0015;
+      if(p.age>p.life||p.y<-30||p.x<-30||p.x>w+30)Object.assign(p,newParticle());
+      const alpha=Math.min(1,p.age*2,(p.life-p.age)*1.8);
+      const color=p.side==='blue'?(Math.random()<.25?'#e4f7ff':'#238bff'):(Math.random()<.3?'#ffdf7a':Math.random()<.5?'#ff5b20':'#ff9c24');
+      ctx.globalAlpha=alpha;ctx.fillStyle=color;ctx.shadowColor=color;ctx.shadowBlur=p.size*5;
+      ctx.beginPath();ctx.arc(p.x,p.y,p.size,0,Math.PI*2);ctx.fill();
+      // occasional fast streaks
+      if(p.size>2&&Math.random()<.17){ctx.globalAlpha=alpha*.45;ctx.fillRect(p.x,p.y,p.vx*12-2,p.vy*-rand(3,10));}
+    });ctx.globalAlpha=1;ctx.shadowBlur=0;
+  }
+  function drawEnergy(t){
+    // Expanding shock rings collide at the center.
+    const period=3.4, phase=(t%period)/period;
+    for(let i=0;i<3;i++){
+      const p=(phase+i/3)%1, r=p*Math.min(w*.42,h*.42);
+      ctx.save();ctx.globalAlpha=(1-p)*.22;ctx.strokeStyle=i%2?'#ff9b2d':'#46a8ff';ctx.lineWidth=2+p*3;
+      ctx.shadowColor=ctx.strokeStyle;ctx.shadowBlur=22;ctx.beginPath();ctx.ellipse(w/2,h*.58,r*1.45,r*.45,0,0,Math.PI*2);ctx.stroke();ctx.restore();
+    }
+    const pulse=.5+.5*Math.sin(t*2.4);
+    const g=ctx.createRadialGradient(w/2,h*.55,0,w/2,h*.55,Math.max(w,h)*.42);
+    g.addColorStop(0,`rgba(255,170,65,${.045+pulse*.045})`);g.addColorStop(.3,'rgba(90,65,120,.025)');g.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=g;ctx.fillRect(0,0,w,h);
+    // Rising twin columns of colored volumetric haze.
+    for(let side=0;side<2;side++){
+      const x=side?w*.79:w*.21;
+      ctx.save();ctx.globalAlpha=.055+.04*Math.sin(t*1.5+side);
+      const beam=ctx.createLinearGradient(x,h*.22,x+Math.sin(t+side)*w*.08,h);
+      beam.addColorStop(0,side?'#ff9a38':'#4a8cff');beam.addColorStop(1,'transparent');
+      ctx.fillStyle=beam;ctx.beginPath();ctx.moveTo(x-w*.09,h);ctx.lineTo(x+w*.1,h);ctx.lineTo(x+Math.sin(t*.6+side)*w*.12,h*.16);ctx.lineTo(x-w*.03,h*.2);ctx.closePath();ctx.fill();ctx.restore();
+    }
+  }
+  function frame(now){
+    if(document.hidden){raf=0;return;}
+    const dt=last?Math.min(.04,(now-last)/1000):.016;last=now;elapsed+=dt;
+    ctx.clearRect(0,0,w,h);
+    if(!reduceMotion){
+      drawSmoke(dt);drawGround(elapsed);drawEnergy(elapsed);drawParticles(dt,elapsed);
+      if(elapsed>lightningAt)startLightning();
+      if(lightning){lightning.life-=dt;if(lightning.life>0)drawBolt(lightning,clamp(lightning.life/.13,0,1));else lightning=null;}
+      flashAlpha=Math.max(0,flashAlpha-dt*2.7);
+      flash.style.opacity=String(flashAlpha);
+      // subtle animated camera parallax
+      world.style.transform=`scale(${1.018+Math.sin(elapsed*.19)*.006}) translate(${Math.sin(elapsed*.23)*.28}%,${Math.cos(elapsed*.17)*.2}%)`;
+      videoLayers.forEach((el,i)=>{el.style.translate=`${Math.sin(elapsed*.35+i*2)*.6}% ${Math.cos(elapsed*.27+i)*.5}%`;});
+    } else {
+      drawGround(0);
+      particles.slice(0,80).forEach(p=>{ctx.globalAlpha=.5;ctx.fillStyle=p.side==='blue'?'#238bff':'#ff9c24';ctx.fillRect(p.x,p.y,p.size,p.size);});
+      ctx.globalAlpha=1;
+    }
+    raf=requestAnimationFrame(frame);
+  }
+  function start(){if(!raf){last=0;raf=requestAnimationFrame(frame);}}
+  function stop(){if(raf){cancelAnimationFrame(raf);raf=0;}}
+  document.addEventListener('visibilitychange',()=>{if(document.hidden){stop();document.querySelectorAll('video').forEach(v=>v.pause());}else{document.querySelectorAll('video').forEach(v=>v.play().catch(()=>{}));start();}});
+  addEventListener('resize',resize,{passive:true});
+  resize();start();
+})();
+</script>
+</body>
+</html>

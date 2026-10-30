@@ -8,7 +8,11 @@ signal died(snake: Snake, killer_name: String)
 signal ate(snake: Snake, kind: int, score_value: int)
 
 const SPACING := 0.075          # polyline sampling spacing (m)
-const RING_COUNT := 384         # body stations (tube rings); texel = 1/384
+const RING_COUNT := 257         # body stations (tube rings); ODD so the tail station (i=RING_COUNT-1) sits on the exact (stride-2) compute grid
+# (was 384 — profiled at ~60% of ALL physics CPU across a full roster; 257
+# rings interpolate a smooth tube for any body length and, with stride-2
+# exact compute below, cut that block by well over half with no visible
+# difference on either camera)
 const RING_TEXEL := 1.0 / float(RING_COUNT)
 # Path history must cover the longest supported body with margin. 2048 samples
 # × 0.075 m = 153.6 m: the boss can reach 90 m and still renders its tail even
@@ -104,13 +108,20 @@ var _tex: ImageTexture
 var _spine_img: Image = null   # reused upload buffer (allocated once)
 var _spine := PackedFloat32Array()   # RING_COUNT*4 floats
 var _raw := PackedVector3Array()     # RING_COUNT station source points
-var _perp := PackedVector3Array()    # lateral direction per station
+var _rad := PackedFloat32Array()      # RING_COUNT per-station radius scratch (stride-2 compute)
+
+# SHARED tube template: built by the first snake, reused by all (see _build_body)
+static var _tube_mesh: ArrayMesh = null
+var _aabb_half := -1.0                # current cull-envelope half-size (growth-aware refresh)
 var _tan := PackedFloat32Array()     # RING_COUNT*4: CPU-smoothed station tangent (frame-stable tube)
 var _tan_img: Image = null           # reused upload buffer for the tangent texture
 var _tan_tex: ImageTexture
 
 # Collision stations (updated per physics frame)
 var coll_pos := PackedVector3Array()
+
+static var prof_spine_us := 0   # dev profiler: cumulative _update_spine µs (reset by the HB print)
+static var prof_body_us := 0    # dev profiler: cumulative whole _physics_process µs
 var coll_r := PackedFloat32Array()
 var coll_stride := 2
 
@@ -144,7 +155,7 @@ func _ready() -> void:
 	_hist.resize(HIST_MAX)
 	_spine.resize(RING_COUNT * 4)
 	_raw.resize(RING_COUNT)
-	_perp.resize(RING_COUNT)
+	_rad.resize(RING_COUNT)
 	_tan.resize(RING_COUNT * 4)
 	_build_body()
 	_build_head()
@@ -210,6 +221,7 @@ func spawn(pos: Vector3, dir: Vector3, body_len: float) -> void:
 func _physics_process(delta: float) -> void:
 	if not alive:
 		return
+	var prof_t0 := Time.get_ticks_usec()   # dev profiler (verbose builds only)
 	_steer(delta)
 	if hold_heading > -900.0:
 		desired_dir = Vector3(sin(hold_heading), 0.0, cos(hold_heading))
@@ -256,28 +268,54 @@ func _physics_process(delta: float) -> void:
 	head_vel = fwd * speed_cur
 	head_pos += head_vel * delta
 
+	# --- terrain following + JUMP ARC: climb OVER court boulders instead of
+	# passing through them. The head rides the environment's height field with
+	# a capped vertical speed. The direction-aware lookup adds the anticipation
+	# ramp: the lift BEGINS `jump_reach` metres before the stone's footprint
+	# edge (proportional to speed), so the leap starts before contact —
+	# gradual lift, glide over the crown, natural landing past the far edge.
+	# No sudden position change anywhere; flat court = the field returns
+	# 0 = unchanged.
+	if grounded and match_world != null:
+		var jr := speed_cur * 0.45 + 1.2
+		var gy: float = match_world.ground_height_at(
+			head_pos.x, head_pos.z, sin(heading), cos(heading), jr)
+		head_pos.y = move_toward(head_pos.y, gy, (speed_cur * 1.9 + 2.5) * delta)
+
 	# --- record path at an exact arc-length step ---
 	_record_path(head_pos)
 
 	wave_phase += speed_cur * delta * 0.95
 
 	_spine_tick += 1
-	if spine_stride > 1 and not spine_full_rate and _spine_tick % spine_stride != 0:
+	# Distance-tiered tube refresh: serpents far from the player (>40 m) drop
+	# from 30 Hz to 20 Hz rebuilds — indistinguishable from the top-down
+	# camera at that range, and meaningfully cheaper with a full roster.
+	var stride := spine_stride
+	if match_world != null and match_world.player != null and match_world.player != self:
+		if head_pos.distance_squared_to(match_world.player.head_pos) > 1600.0:
+			stride = spine_stride_far
+	if stride > 1 and not spine_full_rate and _spine_tick % stride != 0:
 		# Half-rate spine serpents: the (expensive) tube rebuild still runs at
 		# half rate, but the ROOT ANCHOR and the HEAD RIG refresh EVERY tick at
 		# the live position/heading. Otherwise the whole body — and above all
 		# its head — lags one tick behind the steering, which read as an AI
 		# snake's head popping sideways around corners.
-		global_position = head_pos
+		# 2D fake depth: shift the root up-screen by the HEAD's climb height
+		# (the shader shifts stations relative to it; resting lift excluded).
+		global_position = head_pos + Vector3(0.0, 0.0, -head_pos.y * _fake_depth)
 		_length_animate(delta)
 		_update_head(delta, true)
+		Snake.prof_body_us += Time.get_ticks_usec() - prof_t0
 		return
 	# Off-player serpents on the phone tier rebuild+upload the spine tube at
 	# half rate (the rebuild is the single largest sim cost); the trail history
 	# and steering stay at the full rate so gameplay behavior is unchanged.
 	_update_spine(delta)
+	Snake.prof_spine_us += Time.get_ticks_usec() - prof_t0
 	_length_animate(delta)
 	_update_head(delta, false)
+	Snake.prof_body_us += Time.get_ticks_usec() - prof_t0
 
 # ------------------------------------------------------------------ steering
 
@@ -320,9 +358,18 @@ func _update_spine(delta: float) -> void:
 	# so the stations were placed progressively too far back and the body
 	# compressed/jumped as the sample crossed a frame boundary. Arc-length
 	# accumulation makes the tube identical at any frame rate.
+	#
+	# STRIDE-2 EXACT STATIONS: this function is the single biggest physics
+	# cost (~60% of the whole budget with a full roster), so only every
+	# SECOND station goes through the arc-length walk; the in-between
+	# station becomes the chord midpoint of its neighbours. The deviation
+	# from the true path point is bounded by curvature (min turn radius 1 m
+	# at ds≈0.26 m → under 2 cm, an order below the tube radius) and the
+	# uploaded texture stays full-resolution, so the rendered tube is
+	# unchanged. RING_COUNT is odd so the tail station sits on the exact grid.
 	_raw[0] = head
-	var need_i := 1
-	var need := ds
+	var need_i := 2
+	var need := ds * 2.0
 	var prev := head
 	var walked := 0.0
 	var k := 0
@@ -337,8 +384,8 @@ func _update_spine(delta: float) -> void:
 			while need_i < RING_COUNT and need <= walked + seg_len + 0.000001:
 				var f := clampf((need - walked) / seg_len, 0.0, 1.0)
 				_raw[need_i] = prev.lerp(next, f)
-				need_i += 1
-				need += ds
+				need_i += 2
+				need += ds * 2.0
 			walked += seg_len
 		prev = next
 		k += 1
@@ -346,9 +393,16 @@ func _update_spine(delta: float) -> void:
 	# long boss / dev resize): extend straight behind the oldest sample.
 	if need_i < RING_COUNT:
 		var remain := need - walked
-		for i in range(need_i, RING_COUNT):
+		for i in range(need_i, RING_COUNT, 2):
 			_raw[i] = prev + last_back * remain
-			remain += ds
+			remain += ds * 2.0
+	# In-between stations: chord midpoint of their exact neighbours.
+	for i in range(1, RING_COUNT - 1, 2):
+		_raw[i] = (_raw[i - 1] + _raw[i + 1]) * 0.5
+
+	# In-between stations: chord midpoint of their exact neighbours.
+	for i in range(1, RING_COUNT - 1, 2):
+		_raw[i] = (_raw[i - 1] + _raw[i + 1]) * 0.5
 
 	var body_r := _body_radius()
 	# Tangent smoothing window: at least ~1.5 history samples wide. Short
@@ -356,37 +410,78 @@ func _update_spine(delta: float) -> void:
 	# every 7.5 cm history segment on a hard turn, making the tube bunch.
 	var tangent_w := clampi(int(ceil(SPACING * 1.5 / maxf(ds, 0.0001))), 1, 16)
 
-	for i in RING_COUNT:
+	# Ring frame at stride 2 (the expensive half): windowed tangent per exact
+	# station, baked for the GPU ring frame (the shader used to re-derive its
+	# frame from 1-texel spine deltas, which flipped direction on hairpins and
+	# made the tube hop). In-between stations interpolate the two neighbours —
+	# the profile is smooth, so the frame can never disagree across a ring.
+	for i in range(0, RING_COUNT, 2):
 		var i_a := maxi(i - tangent_w, 0)
 		var i_b := mini(i + tangent_w, RING_COUNT - 1)
 		var d3 := _raw[i_b] - _raw[i_a]
 		d3.y = 0.0
 		var dir_i := d3.normalized() if d3.length_squared() > 1e-8 else Vector3(0, 0, 1)
-		var perp := Vector3(-dir_i.z, 0.0, dir_i.x)  # lateral
-		_perp[i] = perp
 		var o4 := i * 4
-		# Bake the smoothed tangent for the GPU ring frame (see upload below):
-		# the shader used to re-derive its frame from 1-texel spine deltas,
-		# which flipped direction on hairpins and made the tube hop.
 		_tan[o4] = dir_i.x
 		_tan[o4 + 1] = dir_i.y
 		_tan[o4 + 2] = dir_i.z
-		# STRICT PATH TRACKING: every station sits exactly ON the path the head
-		# really travelled, at exact `ds` spacing — each segment follows the
-		# precise path of the segment ahead of it with constant spacing. The
-		# old parametric lateral wave displaced stations up to ~0.4 m off that
-		# path (and the per-station lateral axis rotates fast through corners),
-		# which read as bunching, stretching, tail whip and overlap — the exact
-		# artifacts this rewrite removes. The organic slither now lives in the
-		# real path (turns/boost movements) plus the head-rig living bob.
+		_rad[i] = _radius_at(i, body_r)
+	for i in range(1, RING_COUNT - 1, 2):
+		var o4 := i * 4
+		var tx := _tan[o4 - 4] + _tan[o4]
+		var ty := _tan[o4 - 3] + _tan[o4 + 1]
+		var tz := _tan[o4 - 2] + _tan[o4 + 2]
+		var lsq := tx * tx + ty * ty + tz * tz
+		if lsq > 1e-8:
+			var inv := 1.0 / sqrt(lsq)
+			_tan[o4] = tx * inv
+			_tan[o4 + 1] = ty * inv
+			_tan[o4 + 2] = tz * inv
+		else:
+			_tan[o4] = 0.0
+			_tan[o4 + 1] = 0.0
+			_tan[o4 + 2] = 1.0
+		_rad[i] = (_rad[i - 1] + _rad[i + 1]) * 0.5
+
+	# Terrain following + JUMP ARC: every station takes its height from the
+	# environment's climbable-boulder field, so the WHOLE body — head, mid,
+	# tail — follows the arc: the lift wave starts `jump_reach` metres before
+	# each station reaches the stone, glides over the crown, and lands past
+	# the far edge — the body follows the head's leap smoothly, like a real
+	# jump, with no kink between head and neck. Queried with each station's
+	# own travel direction (the baked tangent points head->tail, so the
+	# travel direction is its negation). Horizontal path tracking above is
+	# unchanged; y is a continuous function of (x, z, direction), stable
+	# across frames. Gated by a cheap bounding precheck (reach widened by the
+	# anticipation distance so a snake approaching a boulder is included);
+	# runs AFTER the midpoint fill so interpolated stations get the REAL
+	# field height, and after the tangent bake so the direction is available.
+	if grounded and match_world != null:
+		var jr := speed_cur * 0.45 + 1.2
+		if match_world.climb_near(head_pos, length + jr + 1.0):
+			for i in range(1, RING_COUNT):
+				var sp := _raw[i]
+				var o4t := i * 4
+				sp.y = match_world.ground_height_at(
+					sp.x, sp.z, -_tan[o4t], -_tan[o4t + 2], jr)
+				_raw[i] = sp
+
+	# STRICT PATH TRACKING: every station sits exactly ON the path the head
+	# really travelled, at exact `ds` spacing — each segment follows the
+	# precise path of the segment ahead of it with constant spacing. The
+	# old parametric lateral wave displaced stations up to ~0.4 m off that
+	# path (and the per-station lateral axis rotates fast through corners),
+	# which read as bunching, stretching, tail whip and overlap — the exact
+	# artifacts this rewrite removes. The organic slither now lives in the
+	# real path (turns/boost movements) plus the head-rig living bob.
+	for i in RING_COUNT:
 		var p := _raw[i]
 		if vertical_wave:
 			# Menu-only micro vertical ripple. Gameplay snakes stay flat on
 			# the arena surface (no bobbing / sinking in 2D or 3D).
 			var tv := float(i) * ds * (TAU / 5.2) * 2.0 - (wave_phase + wave_phase_off) * 0.6
 			p += Vector3.UP * (0.02 * sin(tv))
-
-		var r := _radius_at(i, body_r)
+		var r := _rad[i]
 		var o := i * 4
 		# Store head-relative (root-local) coordinates: the tube mesh hangs in
 		# root-local space with the root anchored at the head. `lift` raises the
@@ -397,7 +492,21 @@ func _update_spine(delta: float) -> void:
 		_spine[o + 3] = r
 
 	# Root carries the mesh: anchor the local tube at the head position.
-	global_position = head_pos
+	# 2D fake depth: the ROOT shifts up-screen by the HEAD's own climb height;
+	# the shader already shifts every station by its climb RELATIVE to the
+	# head, so the combined screen offset is each station's absolute climb —
+	# the body reads as slithering over the stone. Resting lift is excluded
+	# from both, so the flat-court 2D look is unchanged.
+	global_position = head_pos + Vector3(0.0, 0.0, -head_pos.y * _fake_depth)
+
+	# Growth-aware cull envelope: stations span up to `length` behind the head
+	# in ANY direction (the body can curl fully around it). Refresh the
+	# per-instance AABB only when it moves ≥0.5 m (the template's fixed 224 m
+	# volume kept every serpent permanently visible — heavy overdraw on phones).
+	var half := length + body_r * 2.0 + 1.0
+	if absf(half - _aabb_half) > 0.5:
+		_aabb_half = half
+		body_mi.custom_aabb = AABB(Vector3(-half, -3.0, -half), Vector3(half * 2.0, 6.0, half * 2.0))
 	# Bank into turns INSIDE the ring frame: each ring rolls a little more
 	# than the one ahead (u_bank · t in the vertex shader), a continuous
 	# corkscrew-like lean. Rotating the whole body MeshInstance about the
@@ -518,7 +627,22 @@ var girth := 1.0
 # >1 = every Nth tick (phone-tier AI serpents — halves the biggest sim cost).
 var spine_stride := 1
 var spine_full_rate := false
+var spine_stride_far := 4    # even slower tube refresh when far from the player (>40 m: 15 Hz)
 var _spine_tick := 0
+# 2D top-down fake depth: 0 = off (3D + menu), 1 = on. When on, the shader
+# shifts the tube up-screen by each station's climb height and the ROOT is
+# shifted by the head's climb height, so the whole body visibly rides OVER
+# court boulders instead of passing through them (world-Y is invisible under
+# the orthographic straight-down 2D camera).
+var _fake_depth := 0.0
+
+func set_fake_depth(v: float) -> void:
+	if _fake_depth == v:
+		return
+	_fake_depth = v
+	if _mat != null:
+		_mat.set_shader_parameter(&"u_fake_depth", v)
+		_mat.set_shader_parameter(&"u_rest_lift", _body_radius() * 0.86 + 0.02)
 
 func _body_radius() -> float:
 	# chunkier bodies read much better from the fixed top-down camera (§1)
@@ -618,6 +742,50 @@ func debug_state() -> String:
 func _build_body() -> void:
 	body_mi = MeshInstance3D.new()
 	body_mi.name = "Body"
+	# SHARED TEMPLATE: the tube template is identical for every snake — build
+	# it once (first snake) and reuse the same ArrayMesh everywhere. 14
+	# private copies previously meant 14 vertex buffers for byte-identical data.
+	if _tube_mesh == null:
+		_tube_mesh = _build_tube_template()
+	body_mi.mesh = _tube_mesh
+
+	if _shader == null:
+		_shader = load("res://shaders/snake_body.gdshader")
+		_scale_albedo = load("res://textures/snake_scales_albedo.png")
+		_scale_normal = load("res://textures/snake_scales_normal.png")
+	if _scale_albedo == null or _scale_normal == null:
+		push_warning("Snake scale textures missing — falling back to flat shading")
+	_mat = ShaderMaterial.new()
+	_mat.shader = _shader
+	_mat.set_shader_parameter(&"u_dorsal", dorsal)
+	_mat.set_shader_parameter(&"u_accent", accent)
+	_mat.set_shader_parameter(&"u_belly", belly)
+	_mat.set_shader_parameter(&"u_seed", skin_seed)
+	_mat.set_shader_parameter(&"u_pattern", float(pattern))
+	_mat.set_shader_parameter(&"u_len", length)
+	_mat.set_shader_parameter(&"u_rings", float(RING_COUNT))
+	_mat.set_shader_parameter(&"u_texel", RING_TEXEL)
+	# keep scale sizes believable as the body thickens (boss snakes use ×1.9)
+	_mat.set_shader_parameter(&"u_rep_ar", 5.0 * (_body_radius() / 0.56))
+	_mat.set_shader_parameter(&"u_tile_al", 0.62 * (_body_radius() / 0.56))
+	_mat.set_shader_parameter(&"u_scale", _scale_albedo)
+	_mat.set_shader_parameter(&"u_scale_n", _scale_normal)
+	_mat.set_shader_parameter(&"u_rim", rim)
+	_mat.set_shader_parameter(&"u_glow", 0.25 if is_boss else 0.0)
+	_mat.set_shader_parameter(&"u_fake_depth", _fake_depth)
+	_mat.set_shader_parameter(&"u_rest_lift", _body_radius() * 0.86 + 0.02)
+	body_mi.material_override = _mat
+	body_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	# Local-space child: the root itself follows the head each frame, so the
+	# tube rides along with its anchor.
+	body_mi.top_level = false
+	body_mi.extra_cull_margin = 2.0   # (was 24 — the live per-instance AABB keeps culling honest)
+	add_child(body_mi)
+	body_mi.global_transform = Transform3D.IDENTITY
+
+## The tube template: root-local, trailing +Z, 257 rings × 15 verts. Built
+## once and shared by every snake (see _build_body).
+func _build_tube_template() -> ArrayMesh:
 	var mesh := ArrayMesh.new()
 	var sides := 15  # ring verts including duplicated seam — smoother silhouette
 	var verts := PackedVector3Array()
@@ -652,42 +820,12 @@ func _build_body() -> void:
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
 	arrays[Mesh.ARRAY_INDEX] = idx
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	# A long snake can curl anywhere around its head, so the cull volume must
-	# cover the maximum body envelope (1440 samples = 108 m of maximum body).
+	# Worst-case envelope as a STARTING value; _update_spine keeps each snake's
+	# PER-INSTANCE AABB tight around its live body length (growth aware). A
+	# fixed 224 m volume made every serpent permanently visible to every
+	# camera — a big chunk of pointless vertex/overdraw work on phones.
 	mesh.custom_aabb = AABB(Vector3(-112.0, -5.0, -112.0), Vector3(224.0, 10.0, 224.0))
-
-	if _shader == null:
-		_shader = load("res://shaders/snake_body.gdshader")
-		_scale_albedo = load("res://textures/snake_scales_albedo.png")
-		_scale_normal = load("res://textures/snake_scales_normal.png")
-	if _scale_albedo == null or _scale_normal == null:
-		push_warning("Snake scale textures missing — falling back to flat shading")
-	_mat = ShaderMaterial.new()
-	_mat.shader = _shader
-	_mat.set_shader_parameter(&"u_dorsal", dorsal)
-	_mat.set_shader_parameter(&"u_accent", accent)
-	_mat.set_shader_parameter(&"u_belly", belly)
-	_mat.set_shader_parameter(&"u_seed", skin_seed)
-	_mat.set_shader_parameter(&"u_pattern", float(pattern))
-	_mat.set_shader_parameter(&"u_len", length)
-	_mat.set_shader_parameter(&"u_rings", float(RING_COUNT))
-	_mat.set_shader_parameter(&"u_texel", RING_TEXEL)
-	# keep scale sizes believable as the body thickens (boss snakes use ×1.9)
-	_mat.set_shader_parameter(&"u_rep_ar", 5.0 * (_body_radius() / 0.56))
-	_mat.set_shader_parameter(&"u_tile_al", 0.62 * (_body_radius() / 0.56))
-	_mat.set_shader_parameter(&"u_scale", _scale_albedo)
-	_mat.set_shader_parameter(&"u_scale_n", _scale_normal)
-	_mat.set_shader_parameter(&"u_rim", rim)
-	_mat.set_shader_parameter(&"u_glow", 0.25 if is_boss else 0.0)
-	body_mi.mesh = mesh
-	body_mi.material_override = _mat
-	body_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	# Local-space child: the root itself follows the head each frame, so the
-	# tube rides along with its anchor.
-	body_mi.top_level = false
-	body_mi.extra_cull_margin = 24.0
-	add_child(body_mi)
-	body_mi.global_transform = Transform3D.IDENTITY
+	return mesh
 
 func _build_head() -> void:
 	var body_r := _body_radius()

@@ -44,6 +44,13 @@ var _next_id := 1
 var _respawn_queue: Array = []
 var _cell := 3.0
 var _hash := {}
+# dev profiler accumulators (verbose builds only; reset by the HB print)
+var prof_hash_us := 0
+var prof_coll_us := 0
+var prof_eat_us := 0
+var prof_game_us := 0   # written by game.gd (main-scene physics callback)
+var prof_mw_us := 0
+var _hash_tick := 0
 var _px := PackedFloat32Array()
 var _pz := PackedFloat32Array()
 var _pr := PackedFloat32Array()
@@ -72,6 +79,36 @@ func _build_arena() -> void:
 	arena.dark = dark
 	add_child(arena)
 	obstacles = arena.obstacles
+	_cache_climbables()
+
+## Walkable surface height at a point (climbable court boulders). Snakes ride
+## this so heads, bodies and tails follow the stone's actual surface. The
+## optional travel direction + reach add the JUMP ARC (lift before the stone,
+## glide over it, landing past it) — see environment_builder.gd.
+func ground_height_at(x: float, z: float, fx := 0.0, fz := 0.0, jump_reach := 0.0) -> float:
+	return arena.ground_height_at(x, z, fx, fz, jump_reach) if is_instance_valid(arena) else 0.0
+
+var _climb_obs: Array = []   # climbable subset of obstacles (h > 0), cached
+
+func _cache_climbables() -> void:
+	_climb_obs.clear()
+	for ob in obstacles:
+		if float(ob.get("h", 0.0)) > 0.0:
+			_climb_obs.append(ob)
+
+## Cheap precheck for the snake spine: true when any climbable boulder sits
+## within `reach` metres of `pos`. Lets a snake skip the per-station terrain
+## pass entirely when it cannot possibly touch a boulder (the common case) —
+## the pass costs 384 field lookups per rebuild otherwise.
+func climb_near(pos: Vector3, reach: float) -> bool:
+	for ob in _climb_obs:
+		var p: Vector3 = ob["pos"]
+		var dx: float = pos.x - p.x
+		var dz: float = pos.z - p.z
+		var rr: float = reach + float(ob["cr"])
+		if dx * dx + dz * dz < rr * rr:
+			return true
+	return false
 
 func _rim_for() -> float:
 	# Theme visibility: edge light on snakes — strong on dark arenas, a touch
@@ -96,6 +133,9 @@ func restyle(dark_v: bool, mode_2d: bool) -> void:
 			# 2D top-down: no whole-body roll — the straight-down camera reads
 			# a banked tube as the snake squashing flat and popping back up
 			s.bank = gfx_mode == 1
+			# 2D fake depth: only in top-down presentation, so boulder climbs
+			# stay visible there (3D shows true height, menu snakes unaffected)
+			s.set_fake_depth(1.0 if gfx_mode == 0 else 0.0)
 
 # ------------------------------------------------------------------ lifecycle
 
@@ -105,9 +145,9 @@ func start_match() -> void:
 	running = true
 	_spawn_base_ang = randf() * TAU
 	_ring_idx = 0
-	# player (must exist even in a pathological obstacle layout)
+	# player — also varied: a medium-class roll, slightly randomized
 	var p: PlayerSnake = PlayerSnake.new()
-	if not _attach(p, true, 7.0):
+	if not _attach(p, true, randf_range(6.5, 8.0)):
 		p.queue_free()
 		player = null
 		match_event.emit("warn", "NO CLEAR PLAYER SPAWN")
@@ -157,10 +197,23 @@ func _spawn_ai() -> bool:
 	var s := AISnake.new()
 	s.configure(pers, self)
 	s.spine_stride = 2   # phone tier: AI serpents rebuild the tube at 30 Hz
-	# 14 opening seats need bodies short enough that one tail never reaches
-	# the next head. Growth in-match is unchanged.
-	var start_len := randf_range(5.0, 11.5)
-	return _attach(s, false, start_len)
+	# Varied STARTING SIZE classes — small / medium / large bodies with matching
+	# girth, so the roster visibly reads as a mixed-size crowd (25 / 50 / 25 %).
+	# The boss stays in its own apex class; growth in-match is unchanged.
+	var roll := randf()
+	if roll < 0.25:
+		# SMALL: short + slim
+		s.girth = randf_range(0.80, 0.85)
+		# 14 opening seats need bodies short enough that one tail never
+		# reaches the next head.
+		return _attach(s, false, randf_range(4.6, 6.2))
+	elif roll < 0.75:
+		# MEDIUM: the classic start
+		s.girth = 1.0
+		return _attach(s, false, randf_range(6.8, 10.5))
+	# LARGE: long + thick
+	s.girth = randf_range(1.18, 1.28)
+	return _attach(s, false, randf_range(11.5, 14.5))
 
 func _spawn_boss() -> bool:
 	var s := AISnake.new()
@@ -209,6 +262,13 @@ func _attach(s: Snake, is_player: bool, start_len: float) -> bool:
 	s.bank = gfx_mode == 1     # 2D mode: no body roll (top-down camera squashes it)
 	s.grounded = true          # ride the arena surface, no vertical bob
 	s.vertical_wave = false
+	s.set_fake_depth(1.0 if gfx_mode == 0 else 0.0)   # 2D fake depth (climb visibility)
+	# EVERY serpent — player included — rebuilds the body tube at 30 Hz (the
+	# HEAD RIG still refreshes at 60 Hz, so the head never lags). The profile
+	# shows the tube rebuild is ~60% of all physics CPU; a 30 Hz tube is
+	# indistinguishable on screen (the camera maps it to smooth motion) and
+	# halves the single biggest cost on both desktop and mobile.
+	s.spine_stride = 2
 	add_child(s)
 	_id_map[s.id] = s
 	s.spawn(pos, dir, start_len)
@@ -309,6 +369,7 @@ func is_boss_alive() -> bool:
 func _physics_process(delta: float) -> void:
 	if not running:
 		return
+	var prof_t0 := Time.get_ticks_usec()
 	match_time += delta
 	_hb += delta
 	if delta > _worst_dt:
@@ -324,10 +385,27 @@ func _physics_process(delta: float) -> void:
 		var rs_v := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIDEO_MEM_USED)
 		var pt: float = Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS)
 		var pr: float = Performance.get_monitor(Performance.TIME_PROCESS)
-		print("HB t=%.1f snakes=%d orbs=%d fps=%d worst_dt=%.0fms | %s | dc=%d objs=%d prims=%.1fk vram=%.0fMB phy=%.1fms proc=%.1fms" % [
+		var spine_ms := float(Snake.prof_spine_us) / 5000.0   # µs over 5 s -> avg ms/frame
+		var body_ms := float(Snake.prof_body_us) / 5000.0
+		var steer_ms := float(AISnake.prof_steer_us) / 5000.0
+		var hash_ms := float(prof_hash_us) / 5000.0
+		var coll_ms := float(prof_coll_us) / 5000.0
+		var eat_ms := float(prof_eat_us) / 5000.0
+		var game_ms := float(prof_game_us) / 5000.0
+		var mw_ms := float(prof_mw_us) / 5000.0
+		Snake.prof_spine_us = 0
+		Snake.prof_body_us = 0
+		AISnake.prof_steer_us = 0
+		prof_hash_us = 0
+		prof_coll_us = 0
+		prof_eat_us = 0
+		prof_game_us = 0
+		prof_mw_us = 0
+		print("HB t=%.1f snakes=%d orbs=%d fps=%d worst_dt=%.0fms | %s | dc=%d objs=%d prims=%.1fk vram=%.0fMB phy=%.1fms proc=%.1fms | spine=%.2f body=%.2f steer=%.2f hash=%.2f coll=%.2f eat=%.2f game=%.2f mw=%.2f" % [
 			match_time, snake_count(), food.count_alive(), Engine.get_frames_per_second(),
 			_worst_dt * 1000.0, food.debug_state(), rs_c, rs_o, rs_p / 1000.0,
-			rs_v / (1024.0 * 1024.0), float(pt) * 1000.0, float(pr) * 1000.0])
+			rs_v / (1024.0 * 1024.0), float(pt) * 1000.0, float(pr) * 1000.0,
+			spine_ms, body_ms, steer_ms, hash_ms, coll_ms, eat_ms, game_ms, mw_ms])
 		_worst_dt = 0.0
 
 	# boss appears in real matches after 60 s; retry if the arena is crowded
@@ -352,18 +430,31 @@ func _physics_process(delta: float) -> void:
 					break
 		# only one respawn per frame
 
-	_build_hash()
+	# Spatial hash rebuilt at 30 Hz: the full rebuild (clear + ~2-3k packed-array
+	# writes + dict inserts) was every physics tick for ~1.7 ms/frame; on the
+	# skipped tick queries use positions at most one tick (≈0.3 m) stale against
+	# combined collision radii of ≥1 m — no gameplay-visible difference.
+	_hash_tick += 1
+	var prof_tw := Time.get_ticks_usec()   # dev profiler (verbose builds only)
+	if _hash_tick % 2 == 0:
+		_build_hash()
+	prof_hash_us += Time.get_ticks_usec() - prof_tw
+	prof_tw = Time.get_ticks_usec()
 	_head_collisions()
+	prof_coll_us += Time.get_ticks_usec() - prof_tw
 	# eat checks tick at 30 Hz: an eat starting one tick late is invisible and
 	# the check is a real share of the phone physics budget (orbs × heads)
 	_eat_tick += 1
 	if _eat_tick % 2 == 0:
+		prof_tw = Time.get_ticks_usec()
 		_eat_checks()
+		prof_eat_us += Time.get_ticks_usec() - prof_tw
 
 	if not demo_mode and player != null and is_instance_valid(player) and player.alive:
 		_update_hud()
 		if not skip_hud_dev:
 			_check_milestones()
+	prof_mw_us += Time.get_ticks_usec() - prof_t0
 
 func snake_count() -> int:
 	var c := 0
@@ -382,8 +473,15 @@ func get_alive_snakes() -> Array:
 			out.append(s)
 	return out
 
+var _near_pool: Array = []   # reused result dicts for nearby_stations (zero alloc steady-state)
+var _near_used := 0
+
+## Stations within `reach` of `point`, excluding snake `exclude_id`.
+## Result dicts come from a shared pool: every caller iterates the result
+## immediately and never retains it, so recycling the same dicts removes the
+## per-call/per-station Dictionary allocations (~20k/sec with a full roster).
 func nearby_stations(point: Vector3, reach: float, exclude_id: int) -> Array:
-	var out: Array = []
+	_near_used = 0
 	var bx := int(floor(point.x / _cell))
 	var bz := int(floor(point.z / _cell))
 	var cr := int(ceil(reach / _cell))
@@ -393,10 +491,22 @@ func nearby_stations(point: Vector3, reach: float, exclude_id: int) -> Array:
 			for idx in arr:
 				if _po[idx] == exclude_id:
 					continue
-				var p := Vector3(_px[idx], 0.0, _pz[idx])
-				if point.distance_to(p) < reach + _pr[idx]:
-					out.append({"pos": p, "r": _pr[idx]})
-	return out
+				var px: float = _px[idx]
+				var pz: float = _pz[idx]
+				var ddx := point.x - px
+				var ddz := point.z - pz
+				var rr: float = reach + _pr[idx]
+				if ddx * ddx + ddz * ddz < rr * rr:
+					var d: Dictionary
+					if _near_used < _near_pool.size():
+						d = _near_pool[_near_used]
+					else:
+						d = {"pos": Vector3(), "r": 0.0}
+						_near_pool.append(d)
+					_near_used += 1
+					d["pos"] = Vector3(px, 0.0, pz)
+					d["r"] = _pr[idx]
+	return _near_pool.slice(0, _near_used)
 
 # ------------------------------------------------------------------ spatial hash
 
@@ -492,10 +602,25 @@ func _kill(victim: Snake, killer, cause_name: String) -> void:
 	victim.die(cause if killer == null or not is_instance_valid(killer) else killer.display_name)
 
 func _on_died(s: Snake, killer_name: String) -> void:
-	# drop mass into collectible orbs (bounded)
-	var stride := maxi(1, int(s.coll_pos.size() / 70.0))
+	# drop mass into collectible orbs, spread along the corpse.
+	# - count scales with the body length (a 7 m serpent leaves ~14 orbs, the
+	#   boss leaves up to 65), capped hard at 85.
+	# - drops keep a MINIMUM GAP (~0.8 m) so the corpse never collapses into
+	#   one overlapping food blob the sweep can only graze.
+	# - living heads are handed to the spawner: at the court hard cap it
+	#   retires a far-away passive orb to make room, so drops ALWAYS appear.
+	var heads: Array = []
+	for other in snakes:
+		if other != s and is_instance_valid(other) and other.alive:
+			heads.append(other.head_pos)
+	var want := clampi(int(s.length * 1.7), 14, 85)
+	var pool := s.coll_pos.size()
+	var stride := maxi(1, int(float(pool) / float(want)))
+	var min_gap := 0.8
+	var min_gap2 := min_gap * min_gap
+	var placed: Array = []
 	var count := 0
-	for i in range(0, s.coll_pos.size(), stride):
+	for i in range(0, pool, stride):
 		if count >= 85:
 			break
 		var kind := 0
@@ -503,8 +628,24 @@ func _on_died(s: Snake, killer_name: String) -> void:
 			kind = 2
 		elif count % 6 == 3:
 			kind = 1
-		var jit := Vector3(randf_range(-0.5, 0.5), 0, randf_range(-0.5, 0.5))
-		food.drop_orb(kind, s.coll_pos[i] + jit)
+		var at: Vector3 = s.coll_pos[i]
+		var base := Vector3(at.x, 0.0, at.z) \
+			+ Vector3(randf_range(-0.5, 0.5), 0.0, randf_range(-0.5, 0.5))
+		# min-gap nudge: deterministic golden-angle SPIRAL away from the base
+		# (a random walk can rattle a drop INTO a placed neighbor again)
+		at = base
+		for attempt in 5:
+			var near := false
+			for d in placed:
+				if d.distance_squared_to(at) < min_gap2:
+					near = true
+					break
+			if not near:
+				break
+			var ang := float(attempt) * 2.3998
+			at = base + Vector3(sin(ang), 0.0, cos(ang)) * (0.55 + 0.5 * float(attempt))
+		placed.append(base + (at - base))
+		food.drop_orb(kind, at, heads)
 		count += 1
 
 	if s.is_player:
@@ -564,11 +705,15 @@ func _eat_checks() -> void:
 				continue
 			if s.is_player:
 				AudioMgr.play("eat" if k == 0 else ("eat_rare" if k == 1 else "eat_gold"))
-				var sv := int(FoodSpawner.KIND_SCORE[k])
+				# score is per-RECORD (tiered): a Large fruit pays its own bonus
+				var sv := int(rec.get("score", FoodSpawner.KIND_SCORE[k]))
 				match_event.emit("eat", "+%d" % sv)
 				if hud != null and is_instance_valid(hud):
 					hud.push_score_popup_at("+%d" % sv, GameHud.role_color("gold") if k == 2 else GameHud.role_color("accent"), h["pos"])
-			s.eat(k, FoodSpawner.KIND_GROWTH[k], FoodSpawner.KIND_SCORE[k])
+			# growth/score come from the record's S/M/L tier, with the flat kind
+			# values as the fallback for records predating tiers
+			s.eat(k, float(rec.get("growth", FoodSpawner.KIND_GROWTH[k])),
+				int(rec.get("score", FoodSpawner.KIND_SCORE[k])))
 			# fruit is drawn into the mouth; the gulp fires when it lands
 			s.eat_bite()
 

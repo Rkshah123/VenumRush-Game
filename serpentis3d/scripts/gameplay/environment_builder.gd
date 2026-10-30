@@ -82,10 +82,15 @@ func _ready() -> void:
 	_skip = int(OS.get_environment("ENV_SKIP"))
 	_build_sky_and_lights()
 	_build_court()
+	# The border wall + ember danger line are GAMEPLAY furniture: they mark the
+	# arena edge in BOTH presentation modes, so they are built OUTSIDE the
+	# _decor() hide-in-2D wrapper. Everything past the wall stays 3D-only.
+	_build_border_wall()
+	_build_ember_ring()
 	# 2D mode is a FLAT overhead board (spec): the surrounding 3D scenery is
 	# hidden so the arena reads as a genuine 2D plane, while gameplay objects
-	# (snakes, fruits, court boulders, boundary) stay 3D and lit. Collisions
-	# are unchanged — the obstacle set is identical in both modes.
+	# (snakes, fruits, court boulders, border wall, boundary) stay 3D and lit.
+	# Collisions are unchanged — the obstacle set is identical in both modes.
 	if _skip < 2:
 		_decor(_build_terrace)
 		_decor(_build_far_range)
@@ -479,13 +484,85 @@ func _build_rim_stones() -> void:
 		rock.scale = Vector3(0.7 + _rng.randf() * 0.25, 0.42 + _rng.randf() * 0.3, 0.7 + _rng.randf() * 0.25)
 		rock.rotation.y = _rng.randf() * TAU
 		add_child(rock)
-	# ember boundary ring — gameplay readability at the kill radius
-	# (brighter/thicker under Dark Theme so the wall never gets lost)
+
+## Theme-matched border wall: a low, hand-laid stone kerb ringing the whole
+## court just OUTSIDE the barrier kill radius. Slightly raised (~0.55-0.75 m)
+## so the fixed top-down camera and every snake remain fully visible, but the
+## arena edge finally reads as a built place. Stone + moss colors come from
+## the active ArenaPreset (Dark Theme dims them via _dk/_contrast_pass).
+## Visible in BOTH 2D and 3D (built outside _decor()).
+func _build_border_wall() -> void:
+	var segs := 96
+	var ri := _arena_r + 0.05          # inner face sits past the kill radius
+	var ro := ri + 0.62                # top cap width = wall thickness
+	var foot := ro + 0.16              # battered footing: wider at the base
+	var stone := _dk(Color(_p["rock"])).lightened(0.10)
+	var stone_dk := stone.darkened(0.30)
+	var moss := _dk(Color(_p["grass_b"])).lerp(_dk(Color(_p["dirt"])), 0.35)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in segs:
+		var a0 := TAU * float(i) / float(segs)
+		var a1 := TAU * float(i + 1) / float(segs)
+		# gentle per-course undulation so the wall reads as hand-laid, not CAD
+		var h0 := 0.52 + 0.20 * _noise2(sin(a0) * 3.0 + 11.0, cos(a0) * 3.0 + 7.0, 2.2)
+		var h1 := 0.52 + 0.20 * _noise2(sin(a1) * 3.0 + 11.0, cos(a1) * 3.0 + 7.0, 2.2)
+		var s0 := sin(a0)
+		var c0 := cos(a0)
+		var s1 := sin(a1)
+		var c1 := cos(a1)
+		var ib0 := Vector3(s0 * ri, 0.0, c0 * ri)
+		var ib1 := Vector3(s1 * ri, 0.0, c1 * ri)
+		var it0 := Vector3(s0 * ri, h0, c0 * ri)
+		var it1 := Vector3(s1 * ri, h1, c1 * ri)
+		var ot0 := Vector3(s0 * ro, h0, c0 * ro)
+		var ot1 := Vector3(s1 * ro, h1, c1 * ro)
+		var ob0 := Vector3(s0 * foot, 0.0, c0 * foot)
+		var ob1 := Vector3(s1 * foot, 0.0, c1 * foot)
+		var face := _jit_col(stone, 0.06)
+		var face_dk := _jit_col(stone_dk, 0.06)
+		var cap := _jit_col(moss, 0.08)
+		# inner face (toward the court)
+		_wall_quad(st, ib1, ib0, it0, it1, face)
+		# top cap (walkable-looking stone with a mossy tint)
+		_wall_quad(st, it0, it1, ot1, ot0, cap)
+		# outer face + battered footing
+		_wall_quad(st, ot1, ot0, ob0, ob1, face_dk)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(1, 1, 1)
+	mat.vertex_color_use_as_albedo = true
+	mat.roughness = 0.92
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var mi := MeshInstance3D.new()
+	mi.mesh = st.commit()
+	mi.material_override = mat
+	add_child(mi)
+
+func _wall_quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, col: Color) -> void:
+	# flat-shaded quad (two triangles, vertex-colored; material culls nothing)
+	st.set_color(col)
+	st.add_vertex(a)
+	st.set_color(col)
+	st.add_vertex(b)
+	st.set_color(col)
+	st.add_vertex(c)
+	st.set_color(col)
+	st.add_vertex(a)
+	st.set_color(col)
+	st.add_vertex(c)
+	st.set_color(col)
+	st.add_vertex(d)
+
+## Ember danger line: gameplay readability at the kill radius — a thin glowing
+## ring on the court surface just INSIDE the wall. Visible in BOTH modes
+## (brighter/thicker under Dark Theme so the boundary never gets lost).
+func _build_ember_ring() -> void:
 	var ember := MeshInstance3D.new()
 	var et := TorusMesh.new()
 	var ring_w := 0.20 if _dark else 0.10
-	et.inner_radius = _arena_r - ring_w
-	et.outer_radius = _arena_r + ring_w
+	var rr := _arena_r - 0.45
+	et.inner_radius = rr - ring_w
+	et.outer_radius = rr + ring_w
 	et.rings = 72
 	et.ring_segments = 3
 	ember.mesh = et
@@ -497,7 +574,7 @@ func _build_rim_stones() -> void:
 	_ember_mat.emission = Color(1.0, 0.32, 0.08) if not _dark else Color(1.0, 0.45, 0.16)
 	_ember_mat.emission_energy_multiplier = 1.0
 	ember.material_override = _ember_mat
-	ember.position.y = 0.10
+	ember.position.y = 0.06
 	add_child(ember)
 
 # ---------------------------------------------------------------- water
@@ -942,7 +1019,10 @@ func _build_rocks() -> void:
 		mi.scale = Vector3(s, s * 0.8, s * (0.8 + _rng.randf() * 0.35))
 		mi.rotation.y = _rng.randf() * TAU
 		add_child(mi)
-		_post_obstacle(p, s * 0.78)
+		# climbable: the visible boulder spans y -0.25..0.62 (scaled ×0.8 s) and
+		# is seated at 0.35 s ⇒ crown ≈ 0.85 s above the court. Avoidance keeps
+		# the old cover radius; the climb field matches the visible footprint.
+		_post_obstacle(p, s * 0.78, 0.85 * s, s * 0.95)
 	# scenic rocks in the terraces
 	var target := _tiered(C_ROCKS)
 	var g2 := 0
@@ -1216,5 +1296,106 @@ func preprocess_override(p: CPUParticles3D, secs: float) -> void:
 
 # ---------------------------------------------------------------- obstacles
 
-func _post_obstacle(pos: Vector3, r: float) -> void:
-	_obstacles.append({"pos": pos, "r": r})
+func _post_obstacle(pos: Vector3, r: float, h: float = 0.0, climb_r: float = 0.0) -> void:
+	# r       = avoidance/clearance radius (AI steering, food placement, spawns)
+	# h       = climbable surface height above the court (0 = not climbable,
+	#           e.g. trees — snakes must not ride canopies)
+	# climb_r = footprint radius of the climbable height field (falls back to r)
+	_obstacles.append({"pos": pos, "r": r, "h": h, "cr": climb_r if climb_r > 0.0 else r})
+	_climb_dirty = true
+
+## Height of the walkable surface at (x, z): a smooth bell dome over every
+## climbable court boulder, 0 everywhere else. Snakes ride this field so head,
+## body and tail follow the stone's actual surface — climbing over smoothly,
+## never clipping through or floating.
+##
+## JUMP ARC (fx/fz = unit travel direction, jump_reach > 0): the snake must
+## START lifting BEFORE it reaches the stone — reaching the edge flat and then
+## popping up read as an unnatural sudden jump. With a direction, the returned
+## height becomes a smooth mesa: the lift begins `jump_reach` metres before
+## the footprint edge, glides at full height across the stone, and lands
+## `jump_reach` metres past the far edge — gradual lift, continuous forward
+## motion, natural landing, no sudden position change anywhere. The leap
+## height scales with how deeply the path cuts the stone, so a dead-centre
+## approach jumps the full height while a grazing pass barely rises.
+## jump_reach <= 0 = pure surface field (no anticipation) — every caller that
+## only asks "how high is the ground here" is unchanged.
+func ground_height_at(x: float, z: float, fx := 0.0, fz := 0.0, jump_reach := 0.0) -> float:
+	var h := 0.0
+	# PERFORMANCE-CRITICAL: this query runs PER SPINE STATION PER REBUILD
+	# (player 60 Hz × 257 stations + every AI serpent). The naive loop over
+	# every obstacle dict (mostly non-climbable trees that get skipped) costs
+	# millions of hashed-dictionary reads per second and saturated the CPU —
+	# the progressive 100 fps → 5 fps collapse in both 2D and 3D. Keep a
+	# packed climbable-only cache and reject far stations with one distance²
+	# test before any arc math runs.
+	if _climb_dirty:
+		_rebuild_climb_cache()
+	var n := _climb_h.size()
+	for i in n:
+		var p := _climb_pos[i]
+		var dx := x - p.x
+		var dz := z - p.z
+		var cr := _climb_cr[i]
+		var d2 := dx * dx + dz * dz
+		var rej := cr + jump_reach
+		if d2 >= rej * rej:
+			continue
+		var top := _climb_h[i]
+		if d2 >= cr * cr:
+			# outside the footprint — the jump arc lives here
+			if jump_reach > 0.0:
+				var along := dx * fx + dz * fz
+				var perp2 := d2 - along * along
+				if perp2 < cr * cr:
+					# leap height: how deeply the travel ray cuts the stone
+					var cut := 1.0 - sqrt(perp2) / cr
+					var jh := top * cut * cut * (3.0 - 2.0 * cut)
+					if jh > 0.001:
+						# ramp: 0 at `jump_reach` out, full leap at the edge
+						var w := 1.0 - (absf(along) - cr) / jump_reach
+						jh *= w * w * (3.0 - 2.0 * w)
+						h = maxf(h, jh)
+			continue
+		var t := 1.0 - sqrt(d2) / cr
+		var bell := t * t * (3.0 - 2.0 * t)   # smoothstep: flat crown, smooth skirt
+		var hh := top * bell
+		if jump_reach > 0.0:
+			# over the stone: glide at the leap height (a flat, level jump
+			# across the crown — the dome skirt would dip mid-leap)
+			var along2 := dx * fx + dz * fz
+			var perp2b := d2 - along2 * along2
+			var cut2 := 1.0 - sqrt(maxf(perp2b, 0.0)) / cr
+			hh = maxf(hh, top * cut2 * cut2 * (3.0 - 2.0 * cut2))
+		h = maxf(h, hh)
+	return h
+
+## Packed climbable-only obstacle cache (pos / footprint radius / surface
+## height). Rebuilt once whenever an obstacle is posted; indexed reads in the
+## per-station loop avoid ~100 hashed dictionary lookups per query.
+var _climb_pos := PackedVector3Array()
+var _climb_cr := PackedFloat32Array()
+var _climb_h := PackedFloat32Array()
+var _climb_dirty := true
+
+## Force the next ground_height_at() to rebuild the climb cache. The QA
+## harness zeroes obstacle heights by writing the dicts directly (hostile
+## to per-obstacle signals), so it must flag the cache explicitly — with-
+## out this, a cache built before the leveling keeps serving stale dome
+## heights and slope measurements race on whether a later stone post
+## happens to refresh it first.
+func invalidate_climb_cache() -> void:
+	_climb_dirty = true
+
+func _rebuild_climb_cache() -> void:
+	_climb_pos.clear()
+	_climb_cr.clear()
+	_climb_h.clear()
+	for ob in _obstacles:
+		var top: float = ob["h"]
+		if top <= 0.0:
+			continue
+		_climb_pos.append(ob["pos"])
+		_climb_cr.append(float(ob["cr"]))
+		_climb_h.append(top)
+	_climb_dirty = false

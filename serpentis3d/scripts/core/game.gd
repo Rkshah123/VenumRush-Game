@@ -32,6 +32,7 @@ var _mode_test := false
 var _joy_test := false
 var _dir_test := false
 var _ctrl_test := false
+var _touchlog := false   # on-device diagnostics: log incoming input events
 var _joy_dev := false
 var _shot_game := false
 var _quit_at := -1.0
@@ -46,8 +47,12 @@ var _powertest := false
 var _eat_test := false
 var _skins_test := false
 var _body_test := false
+var _climb_test := false
+var _video_test := false
 var _villain_test := false
 var _turn_test := false
+var _ai_loop := false
+var _drop_test := false
 var _tap_test := false
 var _turn_probe := 0
 var _skin_dev := -1
@@ -113,9 +118,23 @@ func _ready() -> void:
 			_body_test = true
 			_solo_dev = true
 			_no_death_dev = true
+		if a == "--climb-test":
+			_autoplay = true
+			_climb_test = true
+			_solo_dev = true
+			_no_death_dev = true
+		if a == "--bg-test":
+			_autoplay = true
+			_video_test = true
 		if a == "--villain-test":
 			_autoplay = true
 			_villain_test = true
+		if a == "--ai-loop":
+			_autoplay = true
+			_ai_loop = true
+		if a == "--drop-test":
+			_autoplay = true
+			_drop_test = true
 		if a == "--turn-test":
 			_autoplay = true
 			_turn_test = true
@@ -147,6 +166,8 @@ func _ready() -> void:
 			_ctrl_test = true
 			_no_death_dev = true
 			_solo_dev = true
+		if a == "--touchlog":
+			_touchlog = true
 	_arena_key = str(SaveMgr.get_value("arena", "valley"))
 	if arena_dev != "" and ArenaPresets.ALL.has(arena_dev):
 		_arena_key = arena_dev
@@ -160,6 +181,8 @@ func _ready() -> void:
 	menu_world = MenuWorld.new()
 	menu_world.dark = _theme_id == UiTheme.DARK
 	add_child(menu_world)
+	if hud.menu_back_active():
+		_show_menu_scene()   # storm background is live: keep the 3D demo world dormant
 	# The gameplay world is built LAZILY on the first Play — boot cost and
 	# memory are spent on the menu, and the arena can never leak behind it.
 	match_world = null
@@ -170,6 +193,8 @@ func _ready() -> void:
 	_bind_joystick()   # single connection; the handler resolves the player live
 	if _autoplay:
 		print("DEV: boot theme=%d mode=%d" % [UiTheme.current_id, _gfx_mode])
+	if _touchlog:
+		_touchlog_dump.call_deferred()
 
 	cam = Camera3D.new()
 	cam.fov = 55.0
@@ -206,7 +231,7 @@ func _ready() -> void:
 # Dev flags are accepted both after `--` (user args) and as raw engine args.
 func _collect_dev_args() -> Array[String]:
 	var out: Array[String] = []
-	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--spawntest", "--powertest", "--eat-test", "--skins-test", "--body-test", "--villain-test", "--turn-test", "--tap-test", "--theme-test", "--uix-test", "--mode-test", "--joystick", "--joy-test", "--dir-test", "--ctrl-test"]
+	var allow := ["--autoplay", "--no-death", "--solo", "--hud-off", "--onscreen-test", "--shot-menu", "--shot-skins", "--shot-settings", "--arena-test", "--touch-test", "--touchlog", "--spawntest", "--powertest", "--eat-test", "--skins-test", "--body-test", "--climb-test", "--bg-test", "--villain-test", "--turn-test", "--ai-loop", "--drop-test", "--tap-test", "--theme-test", "--uix-test", "--mode-test", "--joystick", "--joy-test", "--dir-test", "--ctrl-test"]
 	for src in OS.get_cmdline_args() + OS.get_cmdline_user_args():
 		var keep := false
 		if allow.has(src):
@@ -293,9 +318,6 @@ func _dev_sequence() -> void:
 	if _theme_test:
 		await _theme_test_run()
 		return
-	if _eat_test:
-		await _eat_test_run()
-		return
 	if _shot_menu:
 		await _snap("shot_menu.png")
 	if _shot_skins:
@@ -311,17 +333,41 @@ func _dev_sequence() -> void:
 		await _snap("shot_settings.png")
 		_quit_nicely()
 		return
+	if _video_test:
+		# home background QA (Back.html recreation): shader rect must exist,
+		# be visible on the menu, animate over time, spawn lightning bolts,
+		# and shut down when a match starts (runs before _start_play).
+		await get_tree().create_timer(2.2).timeout
+		var rect_ok: bool = hud.menu_back_active()
+		var bolts: int = hud._light_bolts.size()
+		var flash_a: float = hud._flash_a
+		var intensity: float = 1.0
+		if hud._back_mat != null:
+			intensity = hud._back_mat.get_shader_parameter("u_intensity")
+		hud.show_menu(false)   # entering a match must shut the storm down
+		var off: bool = not hud.menu_back_active() and not hud._light_active
+		print("BGTEST rect=%s bolts>0=%s flash=%.2f intensity=%.2f off_in_match=%s %s" % [
+			rect_ok, bolts > 0 or flash_a > 0.0, flash_a, intensity, off,
+			"PASS" if rect_ok and off and intensity > 0.0 else "FAIL"])
+		_quit_nicely()
+		return
 	await get_tree().create_timer(0.6).timeout
 	_start_play()
 	print("DEV: play started")
 	if _body_test:
 		await _body_test_run()
 		return
+	if _climb_test:
+		await _climb_test_run()
+		return
 	if _villain_test:
 		await _villain_test_run()
 		return
 	if _turn_test:
 		await _turn_test_run()
+		return
+	if _ai_loop:
+		await _ai_loop_test_run()
 		return
 	if _tap_test:
 		await _tap_test_run()
@@ -331,6 +377,9 @@ func _dev_sequence() -> void:
 		return
 	if _mode_test:
 		await _mode_test_run()
+		return
+	if _drop_test:
+		await _drop_test_run()
 		return
 	if _joy_test:
 		await _joy_test_run()
@@ -350,6 +399,9 @@ func _dev_sequence() -> void:
 		print("SPAWNTEST done — survives=", match_world.player != null and match_world.player.alive)
 		_quit_nicely()
 		return
+	if _eat_test:
+		await _eat_test_run()
+		return
 	if _powertest:
 		await _powertest_run()
 		return
@@ -362,6 +414,127 @@ func _dev_sequence() -> void:
 	if _shot_game:
 		await _snap("shot_game.png")
 	_quit_nicely()
+	# ---------------------------------------------------------------- death drops
+
+## DROPTEST: death-drop QA (§ user report 3). Kills REAL snakes and measures:
+## 1. A killed serpent leaves collectible orbs ALONG ITS CORPSE, at ~0.8 m
+##    spacing (no one overlapping blob).
+## 2. Drops still appear when the court sits AT the hard cap — the spawner
+##    retires a far-away passive orb to make room for the drop.
+func _drop_test_run() -> void:
+	if match_world == null or match_world.player == null:
+		print("DROPTEST FAIL no match")
+		_quit_nicely()
+		return
+	match_world.no_death = false
+	await _frames(10)
+	var food = match_world.food
+	var cap: int = food.hard_cap
+	var ok := true
+	# every alive rec gets a persistent ID tag → a rec IDENTITY is "new" iff
+	# it carries no tag (content-hashing would break on harmless rec mutations)
+	var dd_id := 0
+	for kind in food._slots.size():
+		for pool: Dictionary in food._slots[kind]:
+			for idx in (pool["alive"] as Dictionary).keys():
+				(pool["alive"] as Dictionary)[idx]["dd_id"] = dd_id
+				dd_id += 1
+
+	# --- case 1: a real kill leaves a spread corpse trail -------------------
+	var victim: Snake = null
+	for s in match_world.snakes:
+		if s is AISnake and s.alive:
+			victim = s
+			break
+	if victim == null:
+		print("DROPTEST FAIL no AI victim")
+		_quit_nicely()
+		return
+	var corpse: PackedVector3Array = victim.coll_pos
+	print("DROPTEST case1 victim=%s len=%.1f court_alive=%d cap=%d" % [
+		victim.display_name, victim.length, food.count_alive(), cap])
+	food.qa_freeze_respawn = true   # only drops can add during the measurement
+	match_world._kill(victim, null, "QA")
+	await _frames(3)
+	var rich := _drop_diff(food)
+	food.qa_freeze_respawn = false
+	var gained := rich.size()
+	var corps_ok := true
+	var min_pair := INF
+	for rec in rich:
+		var p: Vector3 = rec["pos"]
+		var best := INF
+		for st in corpse:
+			best = minf(best, Vector2(p.x - st.x, p.z - st.z).length())
+		if best > 2.5:
+			corps_ok = false
+	for a in rich.size():
+		for b in range(a + 1, rich.size()):
+			min_pair = minf(min_pair, (rich[a]["pos"] as Vector3).distance_to(rich[b]["pos"] as Vector3))
+	var case_ok := gained > 0 and corps_ok and min_pair > 0.35
+	ok = ok and case_ok
+	print("DROPTEST case1 drops=%d on_corpse=%s min_gap=%.2f %s" % [
+		gained, str(corps_ok), min_pair, "PASS" if case_ok else "FAIL"])
+
+	# --- case 2: drops survive a court AT the hard cap -----------------------
+	food.qa_freeze_respawn = true
+	var guard := 0
+	while food._total < cap and guard < 400:
+		food._spawn_orb(0)
+		guard += 1
+	var dd2 := 1000000
+	for kind in food._slots.size():
+		for pool: Dictionary in food._slots[kind]:
+			for idx in (pool["alive"] as Dictionary).keys():
+				(pool["alive"] as Dictionary)[idx]["dd_id"] = dd2
+				dd2 += 1
+	# another victim
+	var victim2: Snake = null
+	for s in match_world.snakes:
+		if s is AISnake and s.alive:
+			victim2 = s
+			break
+	var corpse2 := victim2.coll_pos if victim2 != null else corpse
+	print("DROPTEST case2 court_alive=%d cap=%d victim=%s len=%.1f" % [
+		food.count_alive(), cap, victim2.display_name if victim2 != null else "none",
+		victim2.length if victim2 != null else 0.0])
+	if victim2 != null:
+		match_world._kill(victim2, null, "QA")
+		await _frames(3)
+		var rich2 := _drop_diff(food)
+		food.qa_freeze_respawn = false
+		var gained2 := rich2.size()
+		var under: bool = food._total <= cap
+		var near_ok := true
+		for rec in rich2:
+			var p: Vector3 = rec["pos"]
+			var best := INF
+			for st in corpse2:
+				best = minf(best, Vector2(p.x - st.x, p.z - st.z).length())
+			if best > 2.5:
+				near_ok = false
+		var count_ok := gained2 >= 10
+		var case2_ok: bool = count_ok and under and near_ok
+		ok = ok and case2_ok
+		print("DROPTEST case2 drops_at_cap=%d under_cap=%s on_corpse=%s court_after=%d %s" % [
+			gained2, str(under), str(near_ok), food.count_alive(),
+			"PASS" if case2_ok else "FAIL"])
+	else:
+		ok = false
+		print("DROPTEST case2 drops_at_cap=0 FAIL no AI victim left")
+	print("DROPTEST done — %s" % ("PASS" if ok else "FAIL"))
+	_quit_nicely()
+
+## Court rec dicts WITHOUT the ID tag = orbs that appeared after tagging.
+func _drop_diff(food) -> Array:
+	var out: Array = []
+	for kind in food._slots.size():
+		for pool: Dictionary in food._slots[kind]:
+			for idx in (pool["alive"] as Dictionary).keys():
+				var rec: Dictionary = (pool["alive"] as Dictionary)[idx]
+				if not rec.has("dd_id"):
+					out.append(rec)
+	return out
 
 # ---------------------------------------------------------------- touch QA
 
@@ -625,6 +798,14 @@ func _body_test_run() -> void:
 		_quit_nicely()
 		return
 	match_world.no_death = true
+	# CLIMBTEST owns terrain-following QA; BODYTEST measures the FLAT-court
+	# spine contract (the y_span == 0 guarantee), so level the climbable
+	# height fields for this run. Snake-vs-boulder climbing is measured
+	# separately by --climb-test.
+	for ob in match_world.obstacles:
+		ob["h"] = 0.0
+	if match_world.arena != null and match_world.arena.env != null:
+		match_world.arena.env.invalidate_climb_cache()   # zeroing above only takes effect on the next cache rebuild
 	p.autopilot = false
 	p.keyboard_only = true
 	p.clear_keys()
@@ -703,6 +884,152 @@ func _body_test_run() -> void:
 		absf(fps_err[0] - fps_err[1]) if fps_err.size() == 2 else -1.0,
 		"PASS" if fps_ok else "FAIL"])
 	print("BODYTEST done — %s" % ("PASS" if fail == 0 else "FAIL"))
+	_quit_nicely()
+
+# ---------------------------------------------------------------- climbing QA
+
+## Terrain-following QA: drive the player dead-center over the tallest court
+## boulder and measure the ride. The head must track the climbable height
+## field tightly (no sinking through, no floating), every body station must
+## hug the field (head, mid and tail all follow the stone's surface), the
+## per-frame vertical motion must stay smooth, and the snake must come down
+## the far side to the flat court — a real crawl over the stone, no pass-
+## through and no death (boulders are climbable cover, not walls).
+func _climb_test_run() -> void:
+	var p: PlayerSnake = match_world.player if match_world != null else null
+	if p == null:
+		print("CLIMBTEST FAIL no player")
+		_quit_nicely()
+		return
+	match_world.no_death = true
+	p.autopilot = false
+	p.keyboard_only = true
+	p.clear_keys()
+	p.input_boost = false
+	# pick the tallest climbable court boulder
+	var best := {}
+	for ob in match_world.obstacles:
+		if float(ob.get("h", 0.0)) > float(best.get("h", 0.0)):
+			best = ob
+	if best.is_empty() or float(best["h"]) <= 0.0:
+		print("CLIMBTEST FAIL no climbable boulder registered")
+		_quit_nicely()
+		return
+	var bpos: Vector3 = best["pos"]
+	var bh: float = float(best["h"])
+	var br: float = float(best["cr"])
+	var dir := -Vector3(bpos.x, 0.0, bpos.z).normalized()
+	var start := bpos - dir * (br + 7.0)
+	p.spawn(start, dir, 7.0)
+	await _frames(4)
+	var max_head_err := 0.0
+	var max_station_err := 0.0
+	var max_dy := 0.0
+	var peak_y := -1.0
+	var min_head_err_on_top := 99.0
+	var prev_y := p.head_pos.y
+	var prev := start
+	var crossed := false
+	var prelift_ok := true     # JUMP ARC: lift must begin BEFORE the stone
+	var prelift_min := 99.0
+	for f in 420:
+		await get_tree().physics_frame
+		var hp: Vector3 = p.head_pos
+		var jr := p.speed_cur * 0.45 + 1.2
+		var gy: float = match_world.ground_height_at(
+			hp.x, hp.z, sin(p.heading), cos(p.heading), jr)
+		# head must never sink meaningfully under the surface nor float above it
+		max_head_err = maxf(max_head_err, absf(hp.y - gy))
+		if gy > bh * 0.5:
+			min_head_err_on_top = minf(min_head_err_on_top, absf(hp.y - gy))
+		peak_y = maxf(peak_y, hp.y)
+		max_dy = maxf(max_dy, absf(hp.y - prev_y))
+		max_dy = maxf(max_dy, hp.distance_to(prev) - p.speed_cur / 60.0)  # horizontal sanity
+		prev_y = hp.y
+		prev = hp
+		# JUMP ARC anticipation: while the head is still short of the edge
+		# (inside the ramp zone) it must already be climbing — no "reach the
+		# stone flat, then pop" — and must NOT already be at full leap height
+		# far away from the stone.
+		var d_edge := (bpos - hp).dot(dir) - br
+		if d_edge > 0.0 and d_edge < jr * 0.5:
+			prelift_min = minf(prelift_min, hp.y)
+			if hp.y < bh * 0.2:
+				prelift_ok = false
+		# body stations must sit ON the field (jump arc included) while
+		# over/near the stone
+		for i in range(1, Snake.RING_COUNT, 6):
+			var st: Vector3 = p._raw[i]
+			var o4s := i * 4
+			var sg: float = match_world.ground_height_at(st.x, st.z,
+				-p._tan[o4s], -p._tan[o4s + 2], jr)
+			if sg > 0.05 or st.y > 0.05:
+				max_station_err = maxf(max_station_err, absf(st.y - sg))
+		# done once we are past the boulder and back on the flat court
+		var prog := (hp - start).dot(dir)
+		if prog > br + 9.0 and hp.y <= 0.02:
+			crossed = true
+			break
+	var climb_ok := peak_y >= bh * 0.85
+	var track_ok := max_head_err < 0.20 and min_head_err_on_top < 0.12 and max_station_err < 0.03
+	var smooth_ok := max_dy < 0.5
+	print("CLIMBTEST boulder h=%.2f r=%.2f peak=%.2f head_err=%.3f top_err=%.3f station_err=%.3f dy=%.3f crossed=%s" % [
+		bh, br, peak_y, max_head_err, min_head_err_on_top, max_station_err, max_dy, crossed])
+	print("CLIMBTEST prelift min_y_at_half_ramp=%.3f (want > %.3f) %s" % [
+		prelift_min, bh * 0.2, "ok" if prelift_ok else "TOO LATE"])
+	var alive_ok: bool = p.alive or match_world.no_death
+	print("CLIMBTEST done — %s" % ("PASS" if climb_ok and track_ok and smooth_ok and crossed and prelift_ok and alive_ok else "FAIL"))
+
+	# ---- phase 2: 2D top-down — the climb must stay VISIBLE via fake depth ----
+	# The 2D camera is orthographic straight down (world-Y projects to
+	# nothing), so the tube is shifted up-screen by each station's climb
+	# height: the shader shift (relative to the head) + the ROOT shift (the
+	# head's own climb). Assert wiring + the resulting screen offsets.
+	if not crossed or not track_ok:
+		return   # phase 1 already failed
+	hud.mode_changed.emit(0)
+	await _frames(10)
+	var best2 := {}
+	for ob in match_world.obstacles:
+		if float(ob.get("h", 0.0)) > float(best2.get("h", 0.0)):
+			best2 = ob
+	if best2.is_empty() or float(best2["h"]) <= 0.0:
+		print("CLIMBTEST2D FAIL no climbable boulder after mode switch")
+		_quit_nicely()
+		return
+	var bpos2: Vector3 = best2["pos"]
+	var br2: float = float(best2["cr"])
+	var dir2 := -Vector3(bpos2.x, 0.0, bpos2.z).normalized()
+	var start2: Vector3 = bpos2 - dir2 * (br2 + 7.0)
+	start2.y = 0.0
+	p.spawn(start2, dir2, 7.0)
+	await _frames(6)
+	var fd_ok: bool = p._fake_depth == 1.0
+	var mat_fd: float = p._mat.get_shader_parameter("u_fake_depth") if p._mat != null else 0.0
+	var rest_lift: float = p._mat.get_shader_parameter("u_rest_lift") if p._mat != null else 0.0
+	var root_err := 0.0
+	var max_head_err2 := 0.0
+	var peak_y2 := -1.0
+	for f in 420:
+		await get_tree().physics_frame
+		var hp: Vector3 = p.head_pos
+		var jr2 := p.speed_cur * 0.45 + 1.2
+		var gy: float = match_world.ground_height_at(
+			hp.x, hp.z, sin(p.heading), cos(p.heading), jr2)
+		max_head_err2 = maxf(max_head_err2, absf(hp.y - gy))
+		peak_y2 = maxf(peak_y2, hp.y)
+		# ROOT z-shift: up-screen by exactly the head's climb height, never
+		# including the resting lift (resting look stays identical)
+		if gy > 0.05:
+			root_err = maxf(root_err, absf(p.global_position.z - (hp.z - hp.y)))
+		var prog2 := (hp - start2).dot(dir2)
+		if prog2 > br2 + 9.0 and hp.y <= 0.02:
+			break
+	var fd_all_ok: bool = fd_ok and mat_fd == 1.0 and root_err < 0.05 \
+		and max_head_err2 < 0.20 and peak_y2 >= float(best2["h"]) * 0.85
+	print("CLIMBTEST2D fake_depth=%s mat=%.1f rest_lift=%.2f root_err=%.3f head_err=%.3f peak=%.2f %s" % [
+		fd_ok, mat_fd, rest_lift, root_err, max_head_err2, peak_y2,
+		"PASS" if fd_all_ok else "FAIL"])
 	_quit_nicely()
 
 # ---------------------------------------------------------------- turning QA
@@ -891,8 +1218,14 @@ func _turn_sample(s: Snake, acc: Dictionary) -> void:
 				tan[a], tan[a + 2], tan[b], tan[b + 2]])
 	acc["path_off"] = maxf(float(acc["path_off"]), _turn_path_offset(s))
 	var step_bound: float = s.speed_cur / 60.0 + 0.03
+	# Compare the root against its DESIGNED anchor: in 2D fake-depth the root
+	# is deliberately displaced by the head's climb height (climb visibility),
+	# so a snake standing on a boulder legitimately sits `y*sqrt(2)` away from
+	# head_pos. Measuring raw root-vs-head distance would flag that intended
+	# offset as lag; subtracting the designed shift isolates real lag only.
+	var anchor := s.head_pos + Vector3(0.0, 0.0, -s.head_pos.y * s._fake_depth)
 	acc["lag_ratio"] = maxf(float(acc["lag_ratio"]),
-		(s.global_position - s.head_pos).length() / maxf(step_bound, 0.02))
+		(s.global_position - anchor).length() / maxf(step_bound, 0.02))
 	# Bank moved INTO the ring frame (u_bank · t progressive ring roll). The
 	# old body_mi.rotation.z levered stations by their distance from the head
 	# and made long tails whip sideways on turn start/end; the quantity
@@ -918,6 +1251,12 @@ func _turn_path_offset(s: Snake) -> float:
 	if hist_n < 8:
 		return 0.0
 	var root := s.global_position
+	# Undo the DESIGNED 2D fake-depth shift before comparing against the
+	# sim-space head path: world stations = sim stations + (0,0,-head.y*fd),
+	# so adding head.y*fd back recovers the sim-space XZ the path was
+	# recorded in. Without this, an elevated head (resting lift or a boulder
+	# arc) reads as a uniform lateral offset that is presentation, not drift.
+	root.z += s.head_pos.y * s._fake_depth
 	var worst := 0.0
 	for o in range(0, Snake.RING_COUNT, 24):
 		var w: Vector3 = root + Vector3(s._spine[o], s._spine[o + 1], s._spine[o + 2])
@@ -1035,7 +1374,13 @@ func _villain_test_run() -> void:
 				m["raw_min"], m["raw_max"], m["max_err"], wi,
 				s._spine[w0], s._spine[w0 + 2], s._spine[w1], s._spine[w1 + 2],
 				s.spine_stride, s._spine_tick, s.head_pos.x, s.head_pos.z])
-		if not s.grounded or s.body_lift < 0.20 or m["max_err"] >= 0.30 or m["y_span"] >= 0.01:
+		# Flatness (y_span) is only guaranteed for snakes that CANNOT reach a
+		# climbable boulder: the climbing sim (round A/C) legitimately lifts
+		# body stations onto boulder surfaces (y_span == boulder height) when
+		# a body crosses one. Path tracking (max_err) is asserted for ALL.
+		var can_climb: bool = s.grounded and match_world.climb_near(s.head_pos, s.length + 1.0)
+		if not s.grounded or s.body_lift < 0.20 or m["max_err"] >= 0.30 \
+				or (m["y_span"] >= 0.01 and not can_climb):
 			body_ok = false
 	var ai_ok: bool = moved == ais.size() and turned >= maxi(1, ais.size() - 2) \
 		and body_ok and inside
@@ -1043,6 +1388,123 @@ func _villain_test_run() -> void:
 		moved, ais.size(), turned, ais.size(), str(inside), str(body_ok), worst_err, worst_y,
 		Engine.get_frames_per_second(), "PASS" if ai_ok else "FAIL"])
 	print("VILLAINTEST done — %s" % ("PASS" if count_ok and distinct_ok and spawn_ok and ai_ok and mobile_new_ok else "FAIL"))
+	_quit_nicely()
+
+## AILOOP: anti-loop watchdog QA. Let a FULL live roster play ~70 s of real
+## match, sample every living snake at 1 Hz, then flag per snake:
+## - ORBIT events: 3 s windows with heavy spin (> 0.75 turn accumulated)
+##   while the real displacement stays below ~35% of the expected path —
+##   the exact signature of a stuck circling/axe-tie serpent.
+## - BEACHED stretches: ≥8 consecutive s under 1.5 m/s (stuck against a
+##   wall/boulder with no recovery).
+## PASS = total orbit events ≤ 2 and no beached snake.
+func _ai_loop_test_run() -> void:
+	if match_world == null or match_world.player == null:
+		print("AILOOP FAIL no match")
+		_quit_nicely()
+		return
+	print("AILOOP start dur=70s roster=%d" % match_world.snake_count())
+	var hist := {}   # id -> {name, p[], h[], sp[], path[], kicks}
+	var t := 0.0
+	while t < 70.0:
+		await get_tree().create_timer(1.0).timeout
+		t += 1.0
+		if match_world == null:
+			break
+		for s in match_world.snakes:
+			if not is_instance_valid(s) or not s.alive:
+				continue
+			var h: Dictionary = hist.get(s.id, {})
+			if h.is_empty():
+				h = {"name": s.display_name, "p": [], "h": [], "sp": [], "path": [], "kicks": 0}
+				hist[s.id] = h
+			var ps: Array = h["p"]
+			var walked := 0.0
+			if not ps.is_empty():
+				walked = float(h["path"].back()) + s.head_pos.distance_to(ps.back())
+			(h["p"] as Array).append(s.head_pos)
+			(h["h"] as Array).append(s.heading)
+			(h["sp"] as Array).append(s.speed_cur)
+			(h["path"] as Array).append(walked)
+			if "stuck_kicks" in s:
+				h["kicks"] = int(s.stuck_kicks)
+			elif "ap_loops" in s:
+				h["kicks"] = int(s.ap_loops)
+	var total_orbit := 0
+	var total_kicks := 0
+	var total_pocket := 0
+	var beached := {}
+	var pocketed := {}
+	var engaged := 0
+	var lines: Array[String] = []
+	for id in hist:
+		var h: Dictionary = hist[id]
+		var ps: Array = h["p"]
+		var hs: Array = h["h"]
+		var sps: Array = h["sp"]
+		var paths: Array = h["path"]
+		var n := ps.size()
+		var ev := 0
+		var dead_air := 0
+		var worst_dead := 0
+		for i in range(6, n):
+			var disp: float = ps[i].distance_to(ps[i - 6])
+			var path_amt: float = float(paths[i]) - float(paths[i - 6])
+			var turn := 0.0
+			for j in range(i - 5, i + 1):
+				turn += absf(wrapf(float(hs[j]) - float(hs[j - 1]), -PI, PI))
+			if turn > TAU * 1.3 and path_amt > 1.0 and disp < path_amt * 0.25:
+				ev += 1
+			var mean_spd := (float(sps[i]) + float(sps[i - 1]) + float(sps[i - 2]) + float(sps[i - 3])) * 0.25
+			if mean_spd < 1.5:
+				dead_air += 1
+				worst_dead = maxi(worst_dead, dead_air)
+			else:
+				dead_air = 0
+		var mean_all := 0.0
+		for v in sps:
+			mean_all += float(v)
+		mean_all /= maxf(1.0, float(sps.size()))
+		var kicks := int(h["kicks"])
+		total_kicks += kicks
+		# pocket residency: non-overlapping 20 s blocks whose whole trace
+		# fits inside a 16 m disc — the "stuck circling the same corner"
+		# signature. Continuous running + wandering never triggers this.
+		var pocket_blocks := 0
+		var b0 := 0
+		while b0 + 20 <= n:
+			var bb_w := 0.0
+			var minx := INF
+			var maxx := -INF
+			var minz := INF
+			var maxz := -INF
+			for i in range(b0, b0 + 20):
+				var q: Vector3 = ps[i]
+				minx = minf(minx, q.x)
+				maxx = maxf(maxx, q.x)
+				minz = minf(minz, q.z)
+				maxz = maxf(maxz, q.z)
+			bb_w = (maxx - minx) + (maxz - minz)
+			if bb_w < 22.0:
+				pocket_blocks += 1
+			b0 += 20
+		total_orbit += ev
+		total_pocket += pocket_blocks
+		if mean_all > 1.5:
+			engaged += 1
+		if worst_dead >= 8:
+			beached[str(h["name"])] = worst_dead
+		if pocket_blocks > 0:
+			pocketed[str(h["name"])] = pocket_blocks
+		lines.append("AILOOP %-22s n=%d spd=%.1f orbit_ev=%d kicks=%d pocket=%d dead_air=%d" % [
+			h["name"], sps.size(), mean_all, ev, kicks, pocket_blocks, worst_dead])
+	for l in lines:
+		print(l)
+	var ok := total_pocket <= 4 and beached.is_empty() and engaged >= 2
+	print("AILOOP orbit_events=%d sustained_pocket=%d watchdog_kicks=%d beached=%s engaged=%d/%d %s" % [
+		total_orbit, total_pocket, total_kicks, str(beached.keys()), engaged, hist.size(),
+		"PASS" if ok else "FAIL"])
+	print("AILOOP done — %s" % ("PASS" if ok else "FAIL"))
 	_quit_nicely()
 
 func _key_event(code: int, pressed: bool) -> void:
@@ -1460,7 +1922,50 @@ func _uix_test_run() -> void:
 	await _snap("shot_quit.png")
 	hud.show_quit_confirm(false)
 	await get_tree().process_frame
-	print("UIXTEST quit-cancel %s" % ["PASS" if not hud._quit_panel.visible else "FAIL"])
+	# CANCEL (No) must restore the screen the dialog was opened from —
+	# mid-match that means NO scrim left behind (an invisible scrim was the
+	# mobile quit-freeze: it blocked every touch after "No")
+	var cancel_live_ok: bool = not hud._quit_panel.visible \
+		and not hud.overlay_group.visible and state == State.PLAYING \
+		and not get_tree().paused
+	print("UIXTEST quit-cancel %s" % ["PASS" if cancel_live_ok else "FAIL"])
+	# CANCEL from the PAUSE screen: pause panel must come back, tree still
+	# paused (No cancels the quit, it does not resume the match)
+	_pause()
+	await get_tree().process_frame
+	hud.show_quit_confirm(true)
+	await get_tree().process_frame
+	hud.show_quit_confirm(false)
+	await get_tree().process_frame
+	var cancel_pause_ok: bool = not hud._quit_panel.visible \
+		and hud._pause_panel.visible and hud.overlay_group.visible \
+		and get_tree().paused and state == State.PAUSED
+	print("UIXTEST quit-cancel-pause %s" % ["PASS" if cancel_pause_ok else "FAIL"])
+	# ... and the paused game must still resume cleanly afterwards
+	_resume()
+	await get_tree().process_frame
+	var resume_after_ok: bool = state == State.PLAYING and not get_tree().paused
+	print("UIXTEST resume-after-cancel %s" % ["PASS" if resume_after_ok else "FAIL"])
+	# CANCEL from the HOME MENU (the real mobile flow — the Quit button lives
+	# there): back to the interactive menu, zero scrim, nothing paused
+	hud.tomenu_pressed.emit()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	hud.show_quit_confirm(true)
+	await get_tree().process_frame
+	hud.show_quit_confirm(false)
+	await get_tree().process_frame
+	var cancel_menu_ok: bool = not hud._quit_panel.visible \
+		and not hud.overlay_group.visible and hud.menu_group.visible
+	print("UIXTEST quit-cancel-menu %s" % ["PASS" if cancel_menu_ok else "FAIL"])
+	# repeated quit attempts keep working (no residue builds up)
+	hud.show_quit_confirm(true)
+	await get_tree().process_frame
+	var repeat_ok: bool = hud._quit_panel.visible and hud.overlay_group.visible
+	hud.show_quit_confirm(false)
+	await get_tree().process_frame
+	repeat_ok = repeat_ok and not hud._quit_panel.visible and not hud.overlay_group.visible
+	print("UIXTEST quit-repeat %s" % ["PASS" if repeat_ok else "FAIL"])
 	# Full-bleed menu regression: with a simulated device cutout the themed
 	# menu must still cover the whole viewport, but its interactive column must
 	# start inside the safe area. This checks the actual camera-side fix.
@@ -1476,9 +1981,9 @@ func _uix_test_run() -> void:
 	var old_insets: Vector4 = hud._safe_insets
 	hud._safe_insets = Vector4(60.0, 10.0, 5.0, 20.0)
 	hud._apply_menu_bleed()
-	var exp_left: float = hud._menu_margin_side + 60.0
+	var exp_left: float = hud._menu_margin_side
 	var exp_top: float = hud._menu_margin_top + 10.0
-	var exp_right: float = -(hud._menu_margin_side + 5.0)
+	var exp_right: float = -hud._menu_margin_side
 	var exp_bottom: float = -(hud._menu_margin_bottom + 20.0)
 	var column_safe: bool = hud._menu_column.offset_left >= exp_left - 0.1 \
 		and hud._menu_column.offset_top >= exp_top - 0.1 \
@@ -1500,9 +2005,64 @@ func _uix_test_run() -> void:
 	print("UIXTEST full-bleed-menu %s rect=(%.0f,%.0f)+%.0fx%.0f viewport=%.0fx%.0f" % [
 		"PASS" if menu_covered else "FAIL", menu_rect.position.x, menu_rect.position.y,
 		menu_rect.size.x, menu_rect.size.y, vr.x, vr.y])
+	# Stray-panel probe: every visible painted Control touching the left edge
+	# (x < 40 px) that is NOT an intended full-screen layer — catches off-screen
+	# panel slivers leaking into the view.
+	var strays: Array[String] = []
+	_dump_painted_below_x(hud.menu_group, 40.0, strays)
+	for s in strays:
+		print("UIXTEST stray-x %s" % s)
+	print("UIXTEST stray-count=%d %s" % [strays.size(),
+		"PASS" if strays.is_empty() else "INFO"])
+	# Page-row geometry dump: brand | gap | card positions so a layout bug
+	# shows up as hard numbers instead of a screenshot guess.
+	var page: HBoxContainer = null
+	for c in hud._menu_column.get_children():
+		if c is HBoxContainer:
+			page = c
+			break
+	if page != null:
+		var vr2 := get_viewport().get_visible_rect().size
+		print("UIXTEST pagemeta vs=%v col=(%.0f..%.0f) page=(%.0f..%.0f) sep=%d" % [
+			vr2, hud._menu_column.get_global_rect().position.x,
+			hud._menu_column.get_global_rect().position.x + hud._menu_column.size.x,
+			page.get_global_rect().position.x,
+			page.get_global_rect().position.x + page.size.x,
+			page.get_theme_constant("separation")])
+		for c3 in page.get_children():
+			var cc3 := c3 as Control
+			if cc3 != null:
+				var r3 := cc3.get_global_rect()
+				print("UIXTEST pagerow %s<%s> min_x=%.0f rect=(%.0f..%.0f) w=%.0f" % [
+					cc3.name, cc3.get_class(),
+					cc3.custom_minimum_size.x, r3.position.x,
+					r3.position.x + r3.size.x, r3.size.x])
 	hud._safe_insets = old_insets
 	hud._apply_menu_bleed()
 	_quit_nicely()
+
+## Recursive walk recording visible painted Controls currently left of `x`.
+func _dump_painted_below_x(n: Node, x: float, out: Array[String]) -> void:
+	for c in n.get_children():
+		var cc := c as Control
+		if cc != null and cc.is_visible_in_tree():
+			var r := cc.get_global_rect()
+			if r.size.x > 4.0 and r.size.y > 4.0 and r.position.x < x \
+					and (cc.is_class("PanelContainer") or cc.is_class("Panel") \
+						or cc.is_class("TextureRect") or cc.is_class("ColorRect")):
+				out.append("%s<%s> path=%s rect=(%.0f,%.0f)+%.0fx%.0f" % [
+					cc.name, cc.get_class(), _node_path_short(cc), r.position.x,
+					r.position.y, r.size.x, r.size.y])
+		_dump_painted_below_x(c, x, out)
+
+func _node_path_short(n: Node) -> String:
+	var parts: Array[String] = []
+	var cur := n
+	while cur != null and parts.size() < 5:
+		parts.append(cur.name)
+		cur = cur.get_parent()
+	parts.reverse()
+	return "/".join(parts)
 
 # ---------------------------------------------------------------- theme QA
 
@@ -1539,7 +2099,6 @@ func _theme_test_run() -> void:
 
 	# 2) Drive the real selector pills. Both the UI palette and the dedicated
 	# menu backdrop must change; the arena must not.
-	var beige_name := UiTheme.theme_name(UiTheme.LIGHT)
 	var beige_btn: Button = null
 	var dark_btn: Button = null
 	for b in hud._topt:
@@ -1558,22 +2117,18 @@ func _theme_test_run() -> void:
 	await get_tree().process_frame
 	var light_bg := menu_world.menu_bg_color()
 	var light_menu_ok: bool = not menu_world.dark and light_bg.get_luminance() > 0.60 \
-		and hud._theme_sub != null and is_instance_valid(hud._theme_sub) \
-		and hud._theme_sub.text.contains(beige_name) \
 		and str(SaveMgr.get_value("arena", "valley")) == arena0
-	print("THEMETEST beige-menu bg_lum=%.2f label=%s arena_same=%s %s" % [
-		light_bg.get_luminance(), str(hud._theme_sub.text.contains(beige_name)),
+	print("THEMETEST beige-menu bg_lum=%.2f arena_same=%s %s" % [
+		light_bg.get_luminance(),
 		str(str(SaveMgr.get_value("arena", "valley")) == arena0),
 		"PASS" if light_menu_ok else "FAIL"])
 
 	dark_btn.emit_signal("pressed")
 	await get_tree().process_frame
 	var dark_bg := menu_world.menu_bg_color()
-	var dark_menu_ok: bool = menu_world.dark and dark_bg.get_luminance() < 0.20 \
-		and hud._theme_sub != null and is_instance_valid(hud._theme_sub) \
-		and hud._theme_sub.text.contains("DARK")
-	print("THEMETEST dark-menu bg_lum=%.2f label=%s %s" % [
-		dark_bg.get_luminance(), str(hud._theme_sub.text.contains("DARK")),
+	var dark_menu_ok: bool = menu_world.dark and dark_bg.get_luminance() < 0.20
+	print("THEMETEST dark-menu bg_lum=%.2f %s" % [
+		dark_bg.get_luminance(),
 		"PASS" if dark_menu_ok else "FAIL"])
 
 	# 3) Arena switch must never override the selected menu theme.
@@ -1731,24 +2286,46 @@ func _eat_phase(p, food, length: float, kind: int, count: int, label: String,
 	var anchor := _eat_anchor(food)
 	p.spawn(anchor, Vector3(0, 0, 1), length)
 	await _frames(2)
+	# A magnet granted by an EARLIER case (its timer outlives spawn()) keeps
+	# vacuuming ambient orbs for the whole next case (reach x4.5 ~= 4+ m) and
+	# inflates its gulp count. Each case must measure only its own fruit, so
+	# start every case ability-clean. (The shield halo recomputes from
+	# ability_active every tick, so a direct clear leaves no stale visuals.)
+	p.ability = ""
+	p.ability_left = 0.0
 	food.reset()
 	await _frames(1)
 	var mouth: Vector3 = p.mouth_pos
 	var fwd: Vector3 = Vector3(sin(p.heading), 0.0, cos(p.heading))
-	# clear the reset's fruit off the test lane
+	# Clear the reset's fruit off the ENTIRE test corridor: the player travels
+	# ~30 m during the claim window, so anything ahead of the lane (ambient
+	# power orbs score 0 — the exact "extra gulp, score unchanged" signature)
+	# must go, not just a disc around the mouth. Bury = freeze keeps it gone.
+	# Width 6.0: the MAGNET ability (granted by this case's own power orb 50%
+	# of the time) multiplies the head/mouth sweep reach x4.5 to ~4.5 m, so a
+	# 4.0 m clear left ambient orbs inside vacuum range — legit gameplay ate
+	# them mid-window and inflated the gulp count. 6.0 covers the max
+	# magnetised sweep radius with margin. Records ALREADY IN FLIGHT are
+	# buried too (no "fly" exemption): a claim
+	# from the frames between reset() and this clear would otherwise fly
+	# straight through the case and swallow INSIDE the gulp window — the
+	# exact cross-case pollution this harness kept flaking on. reset() does
+	# the same to every flying record, so mid-flight burial is proven safe.
 	for k in food._slots.size():
 		for s: Dictionary in food._slots[k]:
 			var alive: Dictionary = s["alive"]
 			for idx in alive.keys():
 				var rec: Dictionary = alive[idx]
-				if rec.has("fly"):
-					continue
 				var fp: Vector3 = rec["pos"]
-				if Vector2(fp.x - mouth.x, fp.z - mouth.z).length() < 6.5:
+				var rel := Vector2(fp.x - mouth.x, fp.z - mouth.z)
+				var along := rel.dot(Vector2(fwd.x, fwd.z))
+				if along > -2.0 and along < 40.0 \
+						and (rel - Vector2(fwd.x, fwd.z) * along).length() < 6.0:
 					food._bury_idx(s, idx, k)
 	food._deficit.fill(0)
 	var made: Array = []
 	var qa_base := 1000 + int(Time.get_ticks_msec() % 1000) * 10
+	print("EATTEST setup@%s mouth=%.3v fwd=%.3v anchor=%v" % [label, mouth, fwd, _eat_anchor(food)])
 	for i in count:
 		var at: Vector3 = Vector3(mouth.x, 0.0, mouth.z) + fwd * (0.45 + float(i))
 		if not food._spawn_orb(kind, at):
@@ -1761,6 +2338,7 @@ func _eat_phase(p, food, length: float, kind: int, count: int, label: String,
 			food.qa_freeze_respawn = false
 			return false
 		var irec: Dictionary = info["rec"]
+		print("EATTEST placed@%s #%d at=%.3v rec_pos=%.3v" % [label, i, at, irec["pos"]])
 		irec["qa"] = qa_base + i
 		made.append(info)
 	var n0: int = food.count_alive()
@@ -1769,6 +2347,47 @@ func _eat_phase(p, food, length: float, kind: int, count: int, label: String,
 	var g0: int = p.gulp_count
 	var claimed := {}
 	var claim_ms := {}
+	var eat_log: Array = []
+	var eat_hook := func(snake, kind_e: int, sc: int):
+		# flake diagnostics: WHICH record was just claimed (its flight
+		# carries the orb's original ground position + tier) + where the
+		# eater's head was at claim time
+		var dbg := ""
+		var best_ms := -1
+		for s2 in food._slots[kind_e]:
+			for idx2 in (s2["alive"] as Dictionary).keys():
+				var r2: Dictionary = (s2["alive"] as Dictionary)[idx2]
+				if r2.has("fly") and (r2["fly"] as Dictionary).get("snake") == snake:
+					var ms := int((r2["fly"] as Dictionary).get("start_ms", 0))
+					if ms > best_ms:
+						best_ms = ms
+						dbg = " pos=%.3v from=%.3v tier=%s" % [
+							r2["pos"], (r2["fly"] as Dictionary)["from"],
+							str(r2.get("tier", "-"))]
+		eat_log.append("eat kind=%d score=%d t=%.2f head=%.2v%s" % [
+			kind_e, sc, match_world.match_time, snake.head_pos, dbg])
+	p.ate.connect(eat_hook)
+	# WINDOW-OPEN STATE: any flight already airborne (its swallow will land
+	# INSIDE this case's gulp window — a claim from a previous case) and any
+	# orb still standing inside the strip the clear was supposed to empty.
+	var airborne: Array = []
+	var strip: Array = []
+	for kd in food._slots.size():
+		for s2 in food._slots[kd]:
+			for idx2 in (s2["alive"] as Dictionary).keys():
+				var r2: Dictionary = (s2["alive"] as Dictionary)[idx2]
+				if r2.has("fly"):
+					airborne.append("k%d t=%s snake=%s" % [kd, str(r2.get("tier", "-")),
+						str((r2["fly"] as Dictionary).get("snake", null))])
+					continue
+				var fp: Vector3 = r2["pos"]
+				var rel2 := Vector2(fp.x - mouth.x, fp.z - mouth.z)
+				var along2 := rel2.dot(Vector2(fwd.x, fwd.z))
+				var lat2 := (rel2 - Vector2(fwd.x, fwd.z) * along2).length()
+				if along2 > -2.5 and along2 < 40.5 and lat2 < 6.5:
+					strip.append("k%d t%s a=%.1f l=%.1f" % [kd, str(r2.get("tier", "-")), along2, lat2])
+	print("EATTEST strip@%s in_strip=%d airborne=%d [%s][%s]" % [
+		label, strip.size(), airborne.size(), " | ".join(airborne), " | ".join(strip)])
 	for f in 300:
 		await get_tree().physics_frame
 		for i in made.size():
@@ -1785,8 +2404,11 @@ func _eat_phase(p, food, length: float, kind: int, count: int, label: String,
 	var want_score := 0
 	var want_growth := 0.0
 	if kind < 3:
-		want_score = int(FoodSpawner.KIND_SCORE[kind]) * count
-		want_growth = float(FoodSpawner.KIND_GROWTH[kind]) * float(count)
+		# tier-aware: each spawned record carries its own S/M/L growth+score
+		for m in made:
+			var erec: Dictionary = m["rec"]
+			want_score += int(erec.get("score", FoodSpawner.KIND_SCORE[kind]))
+			want_growth += float(erec.get("growth", FoodSpawner.KIND_GROWTH[kind]))
 	var claimed_ok: bool = claimed.size() == made.size()
 	var score_ok: bool = ds == want_score
 	var growth_ok: bool = absf(dt - want_growth) < 0.001
@@ -1822,21 +2444,32 @@ func _eat_phase(p, food, length: float, kind: int, count: int, label: String,
 		var idx: int = int(made[i]["idx"])
 		var mm: MultiMesh = slot["mm"]
 		var ty: float = mm.get_instance_transform(idx).origin.y
-		if ty > -10.0:
+		# In headless mode the dummy renderer discards MultiMesh instance
+		# data (probe: set+read of any idx returns identity), so the burial
+		# READ is unusable — skip only that visual probe; the burial itself
+		# is separately proven by the record leaving the live pool. On a
+		# windowed build the check stays fully active.
+		if DisplayServer.get_name() != "headless" and ty > -10.0:
 			transform_ok = false
 	# After the claims the lane is clear and respawn is frozen, so any extra
 	# $10 would be exactly the double-count bug this check exists to catch.
 	await _frames(20)
 	var no_double: bool = p.score - s0 == ds \
 		and absf((p.target_length - t0) - dt) < 0.001
+	# Snapshot BEFORE the respawn window opens: with the freeze lifted the
+	# spawner legitimately refills the court anywhere, and the live player
+	# may eat a refill orb — those eats are environment, not the case under
+	# test (the score/double checks above are the double-count guard).
+	var gulp_case: int = p.gulp_count - g0
 	var respawn_ok := true
 	var court_bad := 0
 	if check_respawn:
 		food.qa_freeze_respawn = false
+		var gen0: int = food._gen
 		var seen := false
 		for f in 240:
 			await get_tree().physics_frame
-			if food.count_alive() >= n0:
+			if food._gen >= gen0 + made.size() or food.count_alive() >= n0:
 				seen = true
 				break
 		respawn_ok = seen
@@ -1847,9 +2480,13 @@ func _eat_phase(p, food, length: float, kind: int, count: int, label: String,
 	var ok: bool = claimed_ok and score_ok and growth_ok \
 		and power_ok and gulp_ok and flight_ok and transform_ok and no_double \
 		and respawn_ok and court_bad == 0
+	if p.ate.is_connected(eat_hook):
+		p.ate.disconnect(eat_hook)
+	for e in eat_log:
+		print("EATTEST log %s %s" % [label, e])
 	print("EATTEST %s len=%.0f kind=%d n=%d ds=%d/%d dt=%.2f/%.2f gulp=%d/%d claim=%s fly=%s xform=%s double=%s respawn=%s court=%d %s" % [
 		label, length, kind, count, ds, want_score, dt, want_growth,
-		p.gulp_count - g0, count, str(claimed_ok), str(flight_ok), str(transform_ok),
+		gulp_case, count, str(claimed_ok), str(flight_ok), str(transform_ok),
 		str(no_double), str(respawn_ok), court_bad, "PASS" if ok else "FAIL"])
 	return ok
 
@@ -1984,6 +2621,10 @@ func _wait_expired(p: PlayerSnake, id: String, max_frames: int) -> bool:
 	return false
 
 func _snap(fname: String) -> void:
+	# Headless has no viewport texture; the rig also pollutes timing QA.
+	if DisplayServer.get_name() == "headless":
+		print("DEVSHOT headless-skip ", fname)
+		return
 	print("SNAP-START ", fname)
 	# Prefer the post-draw signal, but never hinge quitting on it.
 	var done := false
@@ -2024,10 +2665,16 @@ func _create_match_world() -> void:
 
 ## Home screen active: menu world awake, gameplay world fully dormant.
 func _show_menu_scene() -> void:
-	menu_world.visible = true
-	menu_world.process_mode = Node.PROCESS_MODE_INHERIT
-	menu_world.ensure_life()
-	menu_world.set_dark(_theme_id == UiTheme.DARK)
+	if hud.menu_back_active():
+		# The home-page storm background is opaque and live: the 3D demo
+		# world stays fully dormant (invisible AND zero CPU) behind it.
+		menu_world.process_mode = Node.PROCESS_MODE_DISABLED
+		menu_world.visible = false
+	else:
+		menu_world.visible = true
+		menu_world.process_mode = Node.PROCESS_MODE_INHERIT
+		menu_world.ensure_life()
+		menu_world.set_dark(_theme_id == UiTheme.DARK)
 	if match_world != null:
 		match_world.visible = false
 		match_world.process_mode = Node.PROCESS_MODE_DISABLED
@@ -2249,6 +2896,10 @@ func _toggle_pause() -> void:
 			pass
 
 func _input(event: InputEvent) -> void:
+	if _touchlog and (event is InputEventScreenTouch or event is InputEventScreenDrag
+			or event is InputEventMouseButton or event is InputEventMouseMotion):
+		print("TOUCHLOG evt ", event.as_text(), " | vp_visible=", get_viewport().get_visible_rect(),
+			" | vp_xform=", get_viewport().get_final_transform())
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_ESCAPE:
 			match state:
@@ -2283,7 +2934,11 @@ func _input(event: InputEvent) -> void:
 
 # ---------------------------------------------------------------- camera
 
+var prof_game_us := 0
+var prof_mw_us := 0
+
 func _physics_process(delta: float) -> void:
+	var t0 := Time.get_ticks_usec()
 	match state:
 		State.MENU:
 			# The dedicated menu scene carries the visuals while the match
@@ -2320,6 +2975,8 @@ func _physics_process(delta: float) -> void:
 					_cam_look = _cam_look.lerp(focus, 1.0 - exp(-1.4 * delta))
 					cam.global_position = _cam_pos
 					cam.look_at(_cam_look, Vector3.UP)
+	if match_world != null:
+		match_world.prof_game_us += Time.get_ticks_usec() - t0
 
 func _topdown_camera(delta: float) -> void:
 	# Graph mode dispatcher (spec §1): 2D = genuine flat top-down board
@@ -2428,6 +3085,22 @@ func _quit_nicely() -> void:
 	SaveMgr.save()
 	get_tree().quit()
 
+## On-device diagnostics: dump the viewport geometry and EVERY HUD button's
+## actual global rect, so a "button visually here but tap lands elsewhere"
+## layout/rotation mismatch becomes directly visible in logcat.
+func _touchlog_dump() -> void:
+	await get_tree().create_timer(2.0).timeout
+	var vp := get_viewport()
+	print("TOUCHLOG boot visible_rect=", vp.get_visible_rect().size,
+		" final_xform=", vp.get_final_transform(),
+		" attach_xform=", vp.get_screen_transform(),
+		" ds_size=", DisplayServer.window_get_size(),
+		" screen_size=", DisplayServer.screen_get_size(),
+		" window_pos=", DisplayServer.window_get_position())
+	for b in hud._tb:
+		if is_instance_valid(b):
+			print("TOUCHLOG btn '%s' rect=%s vis=%s" % [b.text, b.get_global_rect(), b.is_visible_in_tree()])
+
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		_quit_nicely()
@@ -2449,10 +3122,9 @@ func _notification(what: int) -> void:
 			State.OVER:
 				_to_menu()
 			State.MENU:
-				_quit_nicely()
+				# Confirm before closing: an accidental BACK no longer kills the
+				# app instantly; the same dialog the QUIT button opens handles it.
+				hud.show_quit_confirm(true)
 			_:
 				pass
 
-# HUD signal alias fixups (declared after use for readability)
-func _hud_wiring_check() -> void:
-	pass

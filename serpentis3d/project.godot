@@ -7,11 +7,16 @@ config_version=5
 
 config/name="VenomRush"
 config/description="VenomRush — Evolve. Hunt. Dominate. An original 3D snake arena survival game."
-config/version="1.2.0"
+config/version="1.5.0"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7")
 config/icon="res://icon.png"
 config/quit_on_go_back=false
+# Desktop builds store settings/progress under %APPDATA%\VenomRush (Godot
+# user://), giving the game its own identifiable data folder like other
+# real applications. Android keeps its normal per-app private storage.
+config/use_custom_user_dir=true
+config/custom_user_dir_name="VenomRush"
 
 [audio]
 

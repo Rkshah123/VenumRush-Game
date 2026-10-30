@@ -23,9 +23,9 @@ if ($godotExit -ne 0) {
 	Write-Warning "Godot returned $godotExit (known release-keystore warning); APK exists, continuing."
 }
 
-# 2) Sign the APK with the existing release key. Keeping the same package
-#    (com.serpentis3d.game) and key means installing over the old build
-#    preserves the player's save data.
+# 2) Sign the APK with the existing release key. Package is com.venomrush.game
+#    (renamed from com.serpentis3d.game in v1.5 — installing needs a fresh
+#    install, old app data does not carry over).
 $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA "Android\Sdk" }
 $btRoot = Join-Path $sdk "build-tools"
 if (-not (Test-Path $btRoot)) {

@@ -36,11 +36,24 @@ var _preview_cam: Camera3D = null
 var _preview_env: Environment = null
 var _preview_yaw := 0.0
 var _arena_label: Label
-var _arena_sub: Label
-var _theme_sub: Label
 var _pause_btn: Button = null
 var _quit_panel: PanelContainer = null
 var _pause_settings := false
+
+# --- home-page animated background (Back.html recreation) -------------------
+# Full-screen canvas_item shader (storm gradients, drifting embers, fissures)
+# + a CPU lightning layer (Line2D bolts + white flash), menu-only. Sits as the
+# FIRST child of `root`, so every menu UI group draws above it and the 3D demo
+# world beneath it acts as the automatic fallback if the shader is missing.
+var _back_rect: ColorRect = null
+var _back_mat: ShaderMaterial = null
+var _back_ok := false
+var _light_root: Control = null
+var _light_bolts: Array = []       # active bolt pairs {line_glow, line_core, pts, t, life}
+var _flash: ColorRect = null
+var _flash_a := 0.0
+var _light_next := 0.6             # seconds until the next bolt (rand 0.35..1.8, like Back.html)
+var _light_active := false
 var _joystick: TouchJoystick = null
 var _minimap: ArenaMinimap = null
 var _boost_panel: PanelContainer = null
@@ -62,12 +75,13 @@ var _opt_selected: Button = null
 var _page := "main"
 var _menu_land := true            # cached orientation of the last menu build
 var _play_btn: Button = null      # hero action: gentle live pulse
-var _rec_best_lab: Label = null   # personal records in the brand block
-var _rec_len_lab: Label = null
 var _pause_panel: PanelContainer
 var _over_panel: PanelContainer
 var _over_title: Label
-var _over_lines: Label
+var _over_grid: GridContainer        # game-over stats: aligned two-column rows
+var _page_tw: Tween = null           # menu-page crossfade tween
+var _menu_intro_live := false        # intro animation owns the home-page controls
+var _announce_tw: Tween = null       # kill the previous announcement before re-popping
 
 # Theme palettes live in UiTheme (BEIGE / DARK). Static role accessors keep
 # external callers (match_world popups) theme-aware.
@@ -97,6 +111,7 @@ func _ready() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(root)
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	_build_menu_back()
 	_apply_safe_area()
 
 	_build_gameplay()
@@ -113,6 +128,145 @@ func _ready() -> void:
 	AudioServer.set_bus_mute(0, int(SaveMgr.get_value("muted", 0)) == 1)
 	# restore the saved theme across menus, HUD, panels and scrims
 	apply_theme(int(SaveMgr.get_value("theme", UiTheme.LIGHT)))
+
+# --------------------------------------------------- home animated background
+
+## Home-page background: the project's Back.html storm scene recreated in
+## Godot (an HTML file cannot be rendered by the engine). A full-screen
+## canvas_item shader draws the gradients / clouds / embers / fissures; a
+## CPU layer draws jagged lightning bolts (glow + core Line2D pairs) and the
+## white flash, on the same random cadence as Back.html (bolt every 0.35–1.8 s,
+## flash alpha 0.08–0.24). Sits as the FIRST child of `root`, so every menu UI
+## group draws above it. Opaque, so the 3D demo world stays dormant behind it.
+func _build_menu_back() -> void:
+	var shader: Shader = load("res://shaders/menu_back.gdshader")
+	if shader == null:
+		return
+	_back_mat = ShaderMaterial.new()
+	_back_mat.shader = shader
+	# phones get a slightly calmer scene (cheaper shimmer, fewer hot pixels)
+	_back_mat.set_shader_parameter(&"u_intensity", 0.65 if _is_phone_tier() else 1.0)
+	_back_rect = ColorRect.new()
+	_back_rect.material = _back_mat
+	_back_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_back_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_back_rect.visible = false
+	root.add_child(_back_rect)
+	root.move_child(_back_rect, 0)
+
+	# --- CPU lightning layer ---
+	_light_root = Control.new()
+	_light_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_light_root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_light_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_light_root.visible = false
+	_back_rect.add_child(_light_root)
+	_flash = ColorRect.new()
+	_flash.color = Color(1, 1, 1, 0)
+	_flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_flash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_light_root.add_child(_flash)
+	_back_ok = true
+
+func _is_phone_tier() -> bool:
+	var gpu := RenderingServer.get_video_adapter_name().to_lower()
+	return gpu.contains("adreno") or gpu.contains("mali") or gpu.contains("powervr")
+
+## Home page only: the storm plays on the home screens; it never covers a
+## frozen match behind pause-settings, and it shuts down during gameplay.
+func menu_back(on: bool) -> void:
+	if not _back_ok:
+		return
+	var show := on and not _pause_settings
+	_back_rect.visible = show
+	_light_active = show
+	_light_root.visible = show
+	if not show:
+		_clear_bolts()
+		_flash.color = Color(1, 1, 1, 0)
+
+## True while the storm is the live home backdrop (lets Game keep the 3D demo
+## world fully dormant — zero CPU — behind the opaque background).
+func menu_back_active() -> bool:
+	return _back_ok and _back_rect != null and _back_rect.visible
+
+func _clear_bolts() -> void:
+	for b in _light_bolts:
+		var pair: Dictionary = b
+		for k in ["glow", "core"]:
+			var ln: Line2D = pair[k]
+			if is_instance_valid(ln):
+				ln.queue_free()
+	_light_bolts.clear()
+
+## One jagged bolt from the top edge downward (Back.html-style: glow line
+## under a bright core), paired with a white flash pulse.
+func _spawn_bolt() -> void:
+	var vs := root.size
+	if vs.x < 1.0 or vs.y < 1.0:
+		return
+	var x0 := vs.x * randf_range(0.12, 0.88)
+	var y_top := -vs.y * 0.02
+	var y_end := vs.y * randf_range(0.45, 0.85)
+	var pts := PackedVector2Array()
+	var n := 9
+	var x := x0
+	var y := y_top
+	for i in n + 1:
+		pts.append(Vector2(x, y))
+		y = lerpf(y_top, y_end, float(i + 1) / float(n))
+		x += randf_range(-vs.x * 0.05, vs.x * 0.05)
+	var glow := Line2D.new()
+	glow.points = pts
+	glow.width = 14.0
+	glow.default_color = Color(0.55, 0.70, 1.0, 0.30)
+	var core := Line2D.new()
+	core.points = pts
+	core.width = 3.0
+	core.default_color = Color(1, 1, 1, 0.95)
+	for ln in [glow, core]:
+		ln.joint_mode = Line2D.LINE_JOINT_ROUND
+		ln.begin_cap_mode = Line2D.LINE_CAP_ROUND
+		ln.end_cap_mode = Line2D.LINE_CAP_ROUND
+		ln.antialiased = true
+		_light_root.add_child(ln)
+	_light_root.move_child(core, 0)
+	_light_bolts.append({
+		"glow": glow, "core": core,
+		"t": 0.0, "life": randf_range(0.16, 0.34),
+	})
+	# flash, cadence and alpha straight from Back.html (0.08–0.24)
+	_flash_a = maxf(_flash_a, randf_range(0.08, 0.24))
+	_light_next = randf_range(0.35, 1.8)
+
+func _process_lightning(delta: float) -> void:
+	_light_next -= delta
+	if _light_next <= 0.0:
+		_spawn_bolt()
+	# flash decays fast (Back.html exponential fade)
+	if _flash_a > 0.003:
+		_flash_a *= exp(-delta * 7.0)
+		_flash.color = Color(1, 1, 1, _flash_a)
+	elif _flash.color.a > 0.0:
+		_flash.color = Color(1, 1, 1, 0)
+	# bolts fade and die
+	for i in range(_light_bolts.size() - 1, -1, -1):
+		var b: Dictionary = _light_bolts[i]
+		b["t"] = float(b["t"]) + delta
+		var q: float = 1.0 - float(b["t"]) / float(b["life"])
+		if q <= 0.0:
+			for k in ["glow", "core"]:
+				var ln: Line2D = b[k]
+				if is_instance_valid(ln):
+					ln.queue_free()
+			_light_bolts.remove_at(i)
+			continue
+		var gl: Line2D = b["glow"]
+		var co: Line2D = b["core"]
+		if is_instance_valid(gl):
+			gl.default_color.a = 0.30 * q
+		if is_instance_valid(co):
+			co.default_color.a = 0.95 * q
 
 # ---------------------------------------------------------------- gameplay
 
@@ -131,7 +285,7 @@ func _build_gameplay() -> void:
 	var top := PanelContainer.new()
 	top.add_theme_stylebox_override("panel", _panel_style())
 	top.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	top.position.y = 10
+	top.position.y = 10 * _ui_s
 	var tv := VBoxContainer.new()
 	tv.add_theme_constant_override("separation", 2)
 	top.add_child(tv)
@@ -167,9 +321,9 @@ func _build_gameplay() -> void:
 	feed_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
 	feed_panel.anchor_left = 1.0
 	feed_panel.anchor_right = 1.0
-	feed_panel.offset_left = -330
-	feed_panel.offset_right = -14
-	feed_panel.offset_top = 186
+	feed_panel.offset_left = int(-330 * _ui_s)
+	feed_panel.offset_right = int(-14 * _ui_s)
+	feed_panel.offset_top = int(186 * _ui_s)
 	feed_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	feed_box = VBoxContainer.new()
 	feed_box.add_theme_constant_override("separation", 4)
@@ -181,17 +335,17 @@ func _build_gameplay() -> void:
 	var boost_panel := PanelContainer.new()
 	boost_panel.add_theme_stylebox_override("panel", _panel_style())
 	boost_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	boost_panel.offset_left = 18
-	boost_panel.offset_top = -74
-	boost_panel.offset_bottom = -16
+	boost_panel.offset_left = int(18 * _ui_s)
+	boost_panel.offset_top = int(-74 * _ui_s)
+	boost_panel.offset_bottom = int(-16 * _ui_s)
 	var bv := VBoxContainer.new()
 	boost_panel.add_child(bv)
-	_mk_label("BOOST  [SPACE / LMB]" if not OS.has_feature("android") else "BOOST  [2ND FINGER]", 13, "dim", bv)
+	_mk_label("BOOST  [SPACE / LMB]" if not OS.has_feature("android") else "BOOST  [2ND FINGER]", int(13 * _ui_s), "dim", bv)
 	boost_bar = ProgressBar.new()
 	boost_bar.min_value = 0
 	boost_bar.max_value = 1.0
 	boost_bar.value = 1.0
-	boost_bar.custom_minimum_size = Vector2(240, 16)
+	boost_bar.custom_minimum_size = Vector2(240, 16) * _ui_s
 	boost_bar.show_percentage = false
 	boost_bar.add_theme_stylebox_override("background", _bar_bg())
 	var fill := StyleBoxFlat.new()
@@ -207,17 +361,17 @@ func _build_gameplay() -> void:
 	var ab_panel := PanelContainer.new()
 	ab_panel.add_theme_stylebox_override("panel", _panel_style())
 	ab_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	ab_panel.offset_left = 18
-	ab_panel.offset_top = -130
-	ab_panel.offset_bottom = -78
+	ab_panel.offset_left = int(18 * _ui_s)
+	ab_panel.offset_top = int(-130 * _ui_s)
+	ab_panel.offset_bottom = int(-78 * _ui_s)
 	var av2 := VBoxContainer.new()
 	ab_panel.add_child(av2)
-	ab_label = _mk_label("MAGNET PULSE", 13, "warn", av2)
+	ab_label = _mk_label("MAGNET PULSE", int(13 * _ui_s), "warn", av2)
 	ability_bar = ProgressBar.new()
 	ability_bar.min_value = 0
 	ability_bar.max_value = 1.0
 	ability_bar.value = 1.0
-	ability_bar.custom_minimum_size = Vector2(240, 10)
+	ability_bar.custom_minimum_size = Vector2(240, 10) * _ui_s
 	ability_bar.show_percentage = false
 	ability_bar.add_theme_stylebox_override("background", _bar_bg())
 	var afill := StyleBoxFlat.new()
@@ -321,16 +475,18 @@ func force_joystick_dev() -> bool:
 
 func _move_hud_for_joystick(on: bool) -> void:
 	# the stick owns the bottom-left corner: shift boost/ability panels to the
-	# bottom-right so nothing overlaps (spec sections 2 and 7)
-	var w := 268.0
+	# bottom-right so nothing overlaps (spec sections 2 and 7). The shift is
+	# measured from the panels' real minimum size, so it stays correct at
+	# every UI scale instead of a hardcoded 268 px.
+	var edge := 18.0 * _ui_s
 	if on:
 		for p in [_boost_panel, _ability_panel]:
 			if p == null or not is_instance_valid(p):
 				continue
 			p.anchor_left = 1.0
 			p.anchor_right = 1.0
-			p.offset_left = -w - 18.0
-			p.offset_right = -18.0
+			p.offset_left = -p.get_combined_minimum_size().x - edge
+			p.offset_right = -edge
 			p.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	else:
 		for p in [_boost_panel, _ability_panel]:
@@ -338,8 +494,8 @@ func _move_hud_for_joystick(on: bool) -> void:
 				continue
 			p.anchor_left = 0.0
 			p.anchor_right = 0.0
-			p.offset_left = 18.0
-			p.offset_right = w
+			p.offset_left = edge
+			p.offset_right = edge + p.get_combined_minimum_size().x
 			p.grow_horizontal = Control.GROW_DIRECTION_END
 
 func _refresh_joystick_layout() -> void:
@@ -407,9 +563,15 @@ func set_ability(id: String, frac: float) -> void:
 		ability_bar.value = clampf(frac, 0, 1)
 
 func set_boosting(on: bool) -> void:
+	# fill transitions between the accent and boost colors instead of snapping;
+	# the meta guard makes repeated calls while holding boost a no-op
+	if bool(boost_bar.get_meta("boost_on", false)) == on:
+		return
+	boost_bar.set_meta("boost_on", on)
 	var fill := boost_bar.get_theme_stylebox("fill")
 	if fill is StyleBoxFlat:
-		(fill as StyleBoxFlat).bg_color = UiTheme.c("gold") if on else UiTheme.c("accent")
+		var tw := boost_bar.create_tween()
+		tw.tween_property(fill, "bg_color", UiTheme.c("gold") if on else UiTheme.c("accent"), 0.14)
 
 func push_feed(kind: String, text: String) -> void:
 	if feed_box == null:
@@ -422,10 +584,10 @@ func push_feed(kind: String, text: String) -> void:
 			role = "accent"
 		"warn":
 			role = "gold"
-	var lab := _mk_label(text, 14, role, null)
+	var lab := _mk_label(text, int(14 * _ui_s), role, null)
 	lab.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	lab.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	lab.custom_minimum_size = Vector2(300, 0)
+	lab.custom_minimum_size = Vector2(300 * _ui_s, 0)
 	lab.modulate.a = 0.0
 	feed_box.add_child(lab)
 	if feed_box.get_child_count() > 6:
@@ -438,11 +600,16 @@ func push_feed(kind: String, text: String) -> void:
 	tw.tween_property(lab, "modulate:a", 0.0, 0.7)
 	tw.tween_callback(lab.queue_free)
 
-func push_score_popup(text: String, color: Color = Color(0.14, 0.9, 0.78)) -> void:
+const POP_COLOR_FALLBACK := Color(-1, -1, -1, -1)   # sentinel: resolve from the live theme
+
+func push_score_popup(text: String, color: Color = POP_COLOR_FALLBACK) -> void:
 	# Floating "+N" that rises from lower-center and fades — eaten value feedback.
+	# No hardcoded color: the fallback resolves through the active theme palette.
+	if color.a < 0.0:
+		color = UiTheme.c("accent")
 	if _pop_layer == null:
 		return
-	var lab := _mk_label(text, 24, color, _pop_layer)
+	var lab := _mk_label(text, int(24 * _ui_s), color, _pop_layer)
 	lab.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	var vs := _pop_layer.get_viewport_rect().size
 	lab.position = Vector2(vs.x * 0.5 - 60.0 + randf_range(-30.0, 30.0), vs.y * 0.64)
@@ -464,7 +631,7 @@ func push_score_popup_at(text: String, color: Color, world_pos: Vector3) -> void
 	if sp.x < -60 or sp.y < -60 or sp.x > vs.x + 60 or sp.y > vs.y + 60:
 		push_score_popup(text, color)
 		return
-	var lab := _mk_label(text, 22, color, _pop_layer)
+	var lab := _mk_label(text, int(22 * _ui_s), color, _pop_layer)
 	lab.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lab.position = sp + Vector2(-40, -30)
 	var tw := lab.create_tween()
@@ -478,15 +645,22 @@ func announce(title: String, sub: String = "") -> void:
 		return
 	announce_label.text = title
 	announce_sub.text = sub
+	# kill any announcement still running so rapid re-announces never fight
+	if _announce_tw != null and _announce_tw.is_valid():
+		_announce_tw.kill()
+	# the title pops in from a slight zoom for punchy match feedback
+	announce_label.pivot_offset = announce_label.size * 0.5
+	announce_label.scale = Vector2(1.22, 1.22)
 	announce_label.modulate.a = 0.0
 	announce_sub.modulate.a = 0.0
-	var tw := announce_label.create_tween()
-	tw.set_parallel(true)
-	tw.tween_property(announce_label, "modulate:a", 1.0, 0.2)
-	tw.tween_property(announce_sub, "modulate:a", 1.0, 0.2)
-	tw.chain().tween_interval(1.4)
-	tw.chain().tween_property(announce_label, "modulate:a", 0.0, 0.5)
-	tw.parallel().tween_property(announce_sub, "modulate:a", 0.0, 0.5)
+	_announce_tw = announce_label.create_tween()
+	_announce_tw.set_parallel(true)
+	_announce_tw.tween_property(announce_label, "modulate:a", 1.0, 0.2)
+	_announce_tw.tween_property(announce_label, "scale", Vector2.ONE, 0.30).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_announce_tw.tween_property(announce_sub, "modulate:a", 1.0, 0.2)
+	_announce_tw.chain().tween_interval(1.4)
+	_announce_tw.chain().tween_property(announce_label, "modulate:a", 0.0, 0.5)
+	_announce_tw.parallel().tween_property(announce_sub, "modulate:a", 0.0, 0.5)
 
 # ---------------------------------------------------------------- menu
 
@@ -507,11 +681,7 @@ func _build_menu() -> void:
 	_menu_title = null
 	_menu_column = null
 	_play_btn = null
-	_rec_best_lab = null
-	_rec_len_lab = null
 	_arena_label = null
-	_arena_sub = null
-	_theme_sub = null
 
 	_ui_s = _ui_scale()
 	var vs := get_viewport().get_visible_rect().size
@@ -538,12 +708,15 @@ func _build_menu() -> void:
 	_menu_column.add_theme_constant_override("separation", int(6 * _ui_s))
 	_menu_column.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	menu_group.add_child(_menu_column)
-	_menu_margin_side = maxf(18.0, vs.x * (0.075 if land else 0.06))
+	_menu_margin_side = maxf(12.0, vs.x * 0.04)
 	_menu_margin_top = maxf(14.0, vs.y * (0.03 if land else 0.04))
 	# Negative = inset from the bottom edge. The old positive value pushed the
 	# card INTO the device safe-area/taskbar strip and left only ~8 px of air.
-	_menu_margin_bottom = maxf(14.0, vs.y * (0.045 if land else 0.05))
+	_menu_margin_bottom = maxf(14.0, vs.y * 0.05)
 	_apply_menu_bleed()
+
+	# Credit line lives INSIDE the menu card (the hint label at the bottom of
+	# the main action stack): one branded line, no separate footer overlay.
 
 	# ---------------------------------------------------------- brand block
 	var brand := VBoxContainer.new()
@@ -553,31 +726,28 @@ func _build_menu() -> void:
 	logo.texture = load("res://icon.png")
 	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	var logo_px := (120.0 if land else 140.0) * _ui_s
+	# hero-scale brand block: the brand band owns 35% of the viewport width;
+	# logo scales to fill it (capped by height), title width tracks the logo
+	var brand_w := vs.x * 0.35
+	var logo_px := (minf(brand_w * 0.72, vs.y * 0.58) if land
+			else minf(vs.x * 0.92 * 0.42, vs.y * 0.26))
 	logo.custom_minimum_size = Vector2(logo_px, logo_px)
 	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	brand.add_child(logo)
 	_menu_logo = logo
-	var title := _mk_label("VENOMRUSH", int((48 if land else 52) * _ui_s), "accent", brand)
+	# Title width tracks the logo: ~5.6 font-ratio ≈ the logo's horizontal span
+	var title := _mk_label("VENOMRUSH", maxi(int(logo_px / 5.6), 34), "accent", brand)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_color_override("font_shadow_color", UiTheme.c("title_shadow"))
-	title.add_theme_constant_override("shadow_offset_y", 4)
+	title.add_theme_constant_override("shadow_offset_y", 6)
 	_menu_title = title
-	var tag := _mk_label("Evolve. Hunt. Dominate.", int(18 * _ui_s), "dim", brand)
-	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	# personal records: quiet identity line under the tagline
-	var rec := HBoxContainer.new()
-	rec.alignment = BoxContainer.ALIGNMENT_CENTER
-	rec.add_theme_constant_override("separation", 14)
-	brand.add_child(rec)
-	_rec_best_lab = _mk_label("", int(15 * _ui_s), "accent", rec)
-	_rec_len_lab = _mk_label("", int(15 * _ui_s), "dim", rec)
-	_refresh_records()
 
 	# ---------------------------------------------------------- action stack
 	var act := VBoxContainer.new()
-	act.add_theme_constant_override("separation", int(10 * _ui_s))
-	act.alignment = BoxContainer.ALIGNMENT_CENTER
+	act.add_theme_constant_override("separation", int(14 * _ui_s))
+	# Top-aligned card: PLAY sits at the very top of the box and the credit
+	# line closes the stack — the card hugs its content with no dead space.
+	act.alignment = BoxContainer.ALIGNMENT_BEGIN
 	_menu_main = VBoxContainer.new()
 	_menu_main.add_theme_constant_override("separation", int(10 * _ui_s))
 	act.add_child(_menu_main)
@@ -600,10 +770,10 @@ func _build_menu() -> void:
 	_build_arena_section(sel_row)
 	_build_theme_section(sel_row)
 
-	var hint := _mk_label("", int(13 * _ui_s), "dim", _menu_main)
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	hint.text = "mouse steers, LMB boosts" if not _is_touch_device() else "drag steers, 2nd finger boosts"
-	hint.text = "OFFLINE BUILD v1.2 - " + hint.text
+	# Credit: the LAST row inside the box, directly under the selection
+	# panels. The card hugs its content exactly — zero filler space anywhere.
+	var credit := _mk_label("VenomRush - Developed by Khan", int(17 * _ui_s), "dim", _menu_main)
+	credit.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
 	# ---------------------------------------------------------- orientation
 	# The action column sits on a soft themed card so every page — SNAKES, HOW
@@ -612,10 +782,10 @@ func _build_menu() -> void:
 	var act_card := PanelContainer.new()
 	var act_sb := _panel_style(0.55)
 	act_sb.set_corner_radius_all(18)
-	act_sb.content_margin_left = 20 * _ui_s
-	act_sb.content_margin_right = 20 * _ui_s
-	act_sb.content_margin_top = 16 * _ui_s
-	act_sb.content_margin_bottom = 16 * _ui_s
+	act_sb.content_margin_left = 26 * _ui_s
+	act_sb.content_margin_right = 26 * _ui_s
+	act_sb.content_margin_top = 22 * _ui_s
+	act_sb.content_margin_bottom = 22 * _ui_s
 	act_card.add_theme_stylebox_override("panel", act_sb)
 	if not _tpanels.has(act_sb):
 		_tpanels.append(act_sb)
@@ -623,16 +793,25 @@ func _build_menu() -> void:
 	act_card.add_child(act)
 
 	if land:
+		# Exact-proportions landscape page: brand band 35% | gap 2% | box 55%
+		# of the FULL viewport width, with the 4% margins eating the rest.
 		var page := HBoxContainer.new()
-		page.add_theme_constant_override("separation", int(24 * _ui_s))
+		page.add_theme_constant_override("separation", 0)
 		_menu_column.add_child(page)
-		brand.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		brand.size_flags_horizontal = 0
+		brand.custom_minimum_size.x = brand_w
 		brand.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		page.add_child(brand)
+		var gap := Control.new()
+		gap.custom_minimum_size.x = maxf(2.0, vs.x * 0.02)
+		gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		page.add_child(gap)
 		page.add_child(act_card)
 		page.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		act_card.custom_minimum_size = Vector2(clampf(vs.x * 0.52, 420.0 * _ui_s, 980.0 * _ui_s), 0.0)
-		act_card.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		act_card.custom_minimum_size = Vector2(vs.x * 0.55, 0.0)
+		# the card hugs its content — vertically centred, never stretched
+		# into a tall box with dead space inside
+		act_card.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	else:
 		_menu_column.add_child(brand)
 		var spacer := Control.new()
@@ -670,6 +849,8 @@ func _build_settings_page(act: Container) -> void:
 	slider.custom_minimum_size = Vector2(0, int(34 * _ui_s))
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	slider.value_changed.connect(func(v): AudioMgr.set_master_volume(v))
+	# a quiet confirm tick when a drag ends, so the setting feels acknowledged
+	slider.drag_ended.connect(func(changed: bool): if changed: AudioMgr.play("click", -6.0))
 	_style_slider(slider)
 	_menu_settings.add_child(slider)
 	if not _is_touch_device():
@@ -680,6 +861,7 @@ func _build_settings_page(act: Container) -> void:
 		_style_checkbox(full)
 		full.add_theme_font_size_override("font_size", int(16 * _ui_s))
 		full.pressed.connect(func():
+			AudioMgr.play("click")
 			var on := not bool(SaveMgr.get_value("fullscreen", false))
 			SaveMgr.set_value("fullscreen", on)
 			if on:
@@ -752,7 +934,7 @@ func _build_arena_section(parent: Container) -> void:
 	prev_b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	prev_b.pressed.connect(func(): AudioMgr.play("click"); arena_shift.emit(-1))
 	row.add_child(prev_b)
-	_arena_label = _mk_label("VERDANT VALLEY", int(19 * _ui_s), "accent", row)
+	_arena_label = _mk_label("VERDANT VALLEY", int(24 * _ui_s), "accent", row)
 	_arena_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_arena_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_arena_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -761,8 +943,6 @@ func _build_arena_section(parent: Container) -> void:
 	next_b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	next_b.pressed.connect(func(): AudioMgr.play("click"); arena_shift.emit(1))
 	row.add_child(next_b)
-	_arena_sub = _mk_label("", int(12 * _ui_s), "dim", v)
-	_arena_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_refresh_arena_chrome()
 
 func _build_theme_section(parent: Container) -> void:
@@ -778,12 +958,9 @@ func _build_theme_section(parent: Container) -> void:
 	for t in UiTheme.NAMES.size():
 		var tid := t
 		var b := _option_button(row, str(UiTheme.NAMES[tid]), "theme", tid, func(): _set_theme(tid))
-		b.custom_minimum_size = Vector2(0, (60 if _is_touch_device() else 54) * _ui_s)
-		b.add_theme_font_size_override("font_size", int(18 * _ui_s))
+		b.custom_minimum_size = Vector2(0, (64 if _is_touch_device() else 56) * _ui_s)
+		b.add_theme_font_size_override("font_size", int(26 * _ui_s))
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_theme_sub = _mk_label("", int(12 * _ui_s), "dim", v)
-	_theme_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_refresh_theme_chrome()
 
 func _refresh_arena_chrome() -> void:
 	if _arena_label == null or not is_instance_valid(_arena_label):
@@ -791,27 +968,6 @@ func _refresh_arena_chrome() -> void:
 	var key := str(SaveMgr.get_value("arena", "valley"))
 	var preset := ArenaPresets.get_preset(key)
 	_arena_label.text = str(preset.get("name", "VERDANT VALLEY"))
-	if _arena_sub != null and is_instance_valid(_arena_sub):
-		var idx: int = ArenaPresets.ORDER.find(key)
-		_arena_sub.text = "BIOME %d OF %d  ·  ARENA AFFECTS THE MATCH" % [
-			(idx + 1) if idx >= 0 else 1, ArenaPresets.ORDER.size()]
-
-func _refresh_theme_chrome() -> void:
-	var id := int(SaveMgr.get_value("theme", UiTheme.LIGHT))
-	if _theme_sub != null and is_instance_valid(_theme_sub):
-		_theme_sub.text = "%s PALETTE  ·  MENU + HUD" % UiTheme.NAMES[clampi(id, 0, UiTheme.NAMES.size() - 1)]
-func _refresh_records() -> void:
-	# identity line under the tagline: personal bests from the save file
-	if _rec_best_lab == null or not is_instance_valid(_rec_best_lab):
-		return
-	var best := int(SaveMgr.get_value("best_score", 0))
-	var blen := float(SaveMgr.get_value("best_length", 0.0))
-	if best <= 0:
-		_rec_best_lab.text = ""
-		_rec_len_lab.text = ""
-	else:
-		_rec_best_lab.text = "BEST %d" % best
-		_rec_len_lab.text = "TOP LENGTH %d" % int(round(blen))
 
 func _ensure_menu_layout() -> void:
 	# rotations happen while hidden (in-game); rebuild the page for the new
@@ -880,6 +1036,8 @@ func _build_help_menu(vroot: Container) -> void:
 
 func _animate_menu_intro() -> void:
 	# logo pops in, then the menu items stagger in (spec §5/§9)
+	_menu_intro_live = true
+	var last_tw: Tween = null
 	if _menu_logo != null and is_instance_valid(_menu_logo):
 		_menu_logo.pivot_offset = _menu_logo.custom_minimum_size * 0.5
 		_menu_logo.scale = Vector2(0.62, 0.62)
@@ -888,6 +1046,7 @@ func _animate_menu_intro() -> void:
 		tw.set_parallel(true)
 		tw.tween_property(_menu_logo, "scale", Vector2.ONE, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 		tw.tween_property(_menu_logo, "modulate:a", 1.0, 0.4)
+		last_tw = tw
 	var items: Array = []
 	if _menu_title != null:
 		items.append(_menu_title)
@@ -901,6 +1060,13 @@ func _animate_menu_intro() -> void:
 		var tw2 := c.create_tween()
 		tw2.tween_interval(0.22 + 0.09 * float(i))
 		tw2.tween_property(c, "modulate:a", 1.0, 0.28)
+		last_tw = tw2
+	# release ownership when the final stagger finishes, so page crossfades
+	# are free to animate the home page again
+	if last_tw != null and last_tw.is_valid():
+		last_tw.finished.connect(func(): _menu_intro_live = false)
+	else:
+		_menu_intro_live = false
 
 func _swap_menu(show_main: bool) -> void:
 	if _pause_settings:
@@ -916,6 +1082,7 @@ func current_page() -> String:
 	return _page
 
 func _menu_page(page: String) -> void:
+	var changed := _page != page
 	_page = page
 	_menu_main.visible = page == "main"
 	_menu_settings.visible = page == "settings"
@@ -927,6 +1094,26 @@ func _menu_page(page: String) -> void:
 	if _preview_vp != null:
 		# render every frame only on the skins page; keep a last-frame image elsewhere
 		_preview_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if page == "skins" else SubViewport.UPDATE_ONCE
+	# page-switch motion: the incoming page fades in quickly (the outgoing one
+	# hides instantly). The home page is skipped while the intro animation owns
+	# it, so the two animations can never fight over the same alpha.
+	if changed:
+		var target: Control = null
+		match page:
+			"settings":
+				target = _menu_settings
+			"skins":
+				target = _menu_skins
+			"help":
+				target = _menu_help
+			"main":
+				target = _menu_main
+		if target != null and is_instance_valid(target) and (page != "main" or not _menu_intro_live):
+			if _page_tw != null and _page_tw.is_valid():
+				_page_tw.kill()
+			target.modulate.a = 0.0
+			_page_tw = target.create_tween()
+			_page_tw.tween_property(target, "modulate:a", 1.0, 0.18)
 	call_deferred("_fit_menu_column")
 	AudioMgr.play("click")
 
@@ -936,7 +1123,7 @@ func _build_skins_menu(vroot: Container) -> void:
 	_menu_skins = VBoxContainer.new()
 	_menu_skins.add_theme_constant_override("separation", 10)
 	vroot.add_child(_menu_skins)
-	var st := _mk_label("CHOOSE YOUR SERPENT", int(26 * _ui_s), "accent", _menu_skins)
+	var st := _mk_label("CHOOSE YOUR SERPENT", int(30 * _ui_s), "accent", _menu_skins)
 	st.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
 	# live 3D preview: a real Snake slithering in a small viewport — full
@@ -992,7 +1179,7 @@ func _build_skins_menu(vroot: Container) -> void:
 		var b := _menu_button(grid, "", func(): _pick_skin(i))
 		b.custom_minimum_size = Vector2(296 * _ui_s, 52 * _ui_s)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		b.add_theme_font_size_override("font_size", int(18 * _ui_s))
+		b.add_theme_font_size_override("font_size", int(24 * _ui_s))
 		_skin_buttons.append(b)
 	_refresh_skin_buttons()
 	_menu_button(_menu_skins, "BACK", func(): _swap_menu(true))
@@ -1006,8 +1193,10 @@ func _refresh_skin_buttons() -> void:
 		if not SkinCatalog.unlocked(i, best):
 			b.text = "LOCKED %d" % int(sk["unlock"])
 			b.disabled = true
+			b.tooltip_text = "REACH A BEST SCORE OF %d TO UNLOCK" % int(sk["unlock"])
 		else:
 			b.disabled = false
+			b.tooltip_text = ""
 			b.text = ("► %s" % sk["name"]) if i == cur else sk["name"]
 
 func _pick_skin(i: int) -> void:
@@ -1026,6 +1215,9 @@ func _process(delta: float) -> void:
 	if int(Time.get_ticks_msec() / 500) != _safe_tick:
 		_safe_tick = int(Time.get_ticks_msec() / 500)
 		_apply_safe_area()
+	# home background (Back.html recreation): drive lightning while visible
+	if _light_active:
+		_process_lightning(delta)
 	# gentle pulse on the ACTIVE mode/theme button so the current selection is
 	# obvious at a glance (spec §1)
 	if _opt_selected != null and is_instance_valid(_opt_selected) and menu_group != null and menu_group.visible:
@@ -1080,16 +1272,12 @@ func set_arena(key: String) -> void:
 		return
 	var preset := ArenaPresets.get_preset(key)
 	_arena_label.text = str(preset.get("name", "VALLEY"))
-	if _arena_sub != null and is_instance_valid(_arena_sub):
-		var idx: int = ArenaPresets.ORDER.find(key)
-		_arena_sub.text = "BIOME %d OF %d  ·  ARENA AFFECTS THE MATCH" % [
-			(idx + 1) if idx >= 0 else 1, ArenaPresets.ORDER.size()]
 
 func show_menu(v: bool) -> void:
 	menu_group.visible = v
 	overlay_group.visible = false if v else overlay_group.visible
+	menu_back(v)
 	if v:
-		_refresh_records()
 		_ensure_menu_layout()   # orientation may have flipped while hidden
 		call_deferred("_fit_menu_column")
 
@@ -1110,6 +1298,11 @@ func _build_pause() -> void:
 	_pause_panel.set_anchors_preset(Control.PRESET_CENTER)
 	_pause_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_pause_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	# Control.visible defaults to TRUE: left uninitialised, this panel was only
+	# hidden by its (hidden) overlay parent — and show_quit_confirm's
+	# "remember where the dialog came from" logic then captured that bogus
+	# true and resurrected a ghost PAUSED panel over the menu on CANCEL.
+	_pause_panel.visible = false
 	overlay_group.add_child(_pause_panel)
 	var p := VBoxContainer.new()
 	p.add_theme_constant_override("separation", 10)
@@ -1120,7 +1313,7 @@ func _build_pause() -> void:
 	_menu_button(p, "RESTART MATCH", func(): restart_pressed.emit())
 	_menu_button(p, "SETTINGS", func(): _open_settings_from_pause())
 	_menu_button(p, "MAIN MENU", func(): tomenu_pressed.emit())
-	var hint := _mk_label("ESC TO RESUME" if not OS.has_feature("android") else "BACK / TAP RESUME", 13, "dim", p)
+	var hint := _mk_label("ESC TO RESUME" if not OS.has_feature("android") else "BACK / TAP RESUME", int(13 * _ui_scale()), "dim", p)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
 func _open_settings_from_pause() -> void:
@@ -1135,23 +1328,49 @@ func _build_pause_button() -> void:
 	# in both 2D and 3D modes (the top-right corner belongs to the arena radar);
 	# lives on `root` so it stays tappable while paused
 	_pause_btn = Button.new()
-	_pause_btn.text = "||"
+	_pause_btn.text = "❚❚"
 	_pause_btn.tooltip_text = "PAUSE / RESUME"
 	_pause_btn.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	_pause_btn.offset_left = 16
-	_pause_btn.offset_right = 76
-	_pause_btn.offset_top = 14
-	_pause_btn.offset_bottom = 74
+	_pause_btn.offset_left = int(16 * _ui_s)
+	_pause_btn.offset_right = int(76 * _ui_s)
+	_pause_btn.offset_top = int(14 * _ui_s)
+	_pause_btn.offset_bottom = int(74 * _ui_s)
 	_pause_btn.focus_mode = Control.FOCUS_NONE
 	_style_button(_pause_btn, true)
-	_pause_btn.add_theme_font_size_override("font_size", 24)
+	_pause_btn.add_theme_font_size_override("font_size", int(24 * _ui_s))
 	_pause_btn.add_theme_color_override("font_color", UiTheme.c("panel_bg"))
 	_pause_btn.pressed.connect(func(): AudioMgr.play("click"); pause_pressed.emit())
 	root.add_child(_pause_btn)
 	_pause_btn.visible = false
 
+## Overlay reveal: fade + settle-scale for the pause / game-over / quit
+## panels. The HUD is PROCESS_MODE_ALWAYS, so the tween runs while the tree
+## is paused. Killing the previous tween (stored in meta) keeps rapid
+## open/close/open sequences deterministic.
+func _reveal_panel(panel: Control) -> void:
+	if panel.has_meta("reveal_tw"):
+		var old: Tween = panel.get_meta("reveal_tw")
+		if old != null and old.is_valid():
+			old.kill()
+	panel.modulate.a = 0.0
+	panel.scale = Vector2(0.94, 0.94)
+	panel.pivot_offset = panel.size * 0.5
+	if not panel.has_meta("pivot_wired"):
+		# keep the panel scaling about its center through every layout change
+		panel.set_meta("pivot_wired", true)
+		panel.resized.connect(func():
+			if is_instance_valid(panel):
+				panel.pivot_offset = panel.size * 0.5)
+	var tw := panel.create_tween()
+	panel.set_meta("reveal_tw", tw)
+	tw.set_parallel(true)
+	tw.tween_property(panel, "modulate:a", 1.0, 0.16)
+	tw.tween_property(panel, "scale", Vector2.ONE, 0.26).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
 func show_pause(v: bool) -> void:
 	_pause_panel.visible = v
+	if v:
+		_reveal_panel(_pause_panel)
 	overlay_group.visible = v or (_quit_panel != null and _quit_panel.visible)
 	# the stick is only for live play (spec section 2)
 	_refresh_joystick(not v and gameplay_group.visible)
@@ -1171,7 +1390,14 @@ func _build_gameover() -> void:
 	p.custom_minimum_size = Vector2(460 * _ui_scale(), 0)   # wide tappable rows
 	_over_panel.add_child(p)
 	_over_title = _mk_label("ELIMINATED", int(44 * _ui_scale()), "warn", p)
-	_over_lines = _mk_label("", int(17 * _ui_scale()), "text", p)
+	# stats as a true two-column grid: keys left, values right-aligned —
+	# proportional fonts can never align space-padded single-label columns
+	_over_grid = GridContainer.new()
+	_over_grid.columns = 2
+	_over_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_over_grid.add_theme_constant_override("h_separation", int(24 * _ui_scale()))
+	_over_grid.add_theme_constant_override("v_separation", int(4 * _ui_scale()))
+	p.add_child(_over_grid)
 	_menu_button(p, "RESTART", func(): restart_pressed.emit())
 	_menu_button(p, "MAIN MENU", func(): tomenu_pressed.emit())
 
@@ -1182,21 +1408,31 @@ func show_gameover_hidden() -> void:
 	if _quit_panel != null:
 		_quit_panel.visible = false
 
+func _over_row(key: String, val: String, val_role: String = "text") -> void:
+	var k := _mk_label(key, int(16 * _ui_scale()), "dim", _over_grid)
+	var v := _mk_label(val, int(16 * _ui_scale()), val_role, _over_grid)
+	v.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
 func show_gameover(stats: Dictionary) -> void:
 	_over_title.text = str(stats.get("title", "ELIMINATED"))
-	var lines := "\n".join(PackedStringArray([
-		"CAUSE      %s" % str(stats.get("cause", "unknown")),
-		"SCORE      %s%s" % [stats.get("score", 0), "   [NEW BEST]" if bool(stats.get("is_best", false)) else ""],
-		"LENGTH     %d M" % int(stats.get("length", 0.0)),
-		"SURVIVED   %d:%02d" % [int(stats.get("time", 0.0)) / 60, int(stats.get("time", 0.0)) % 60],
-		"ELIMINATIONS %d" % int(stats.get("kills", 0)),
-		"RANK       %d / %d" % [stats.get("rank", 1), stats.get("total", 1)],
-		"BEST SCORE %s" % stats.get("best", 0),
-	]))
-	_over_lines.text = lines
+	for c in _over_grid.get_children():
+		_over_grid.remove_child(c)
+		c.queue_free()
+	var t := float(stats.get("time", 0.0))
+	var best_flag := bool(stats.get("is_best", false))
+	_over_row("CAUSE", str(stats.get("cause", "unknown")))
+	_over_row("SCORE", "%s%s" % [stats.get("score", 0), "   [NEW BEST]" if best_flag else ""],
+		"gold" if best_flag else "text")
+	_over_row("LENGTH", "%d M" % int(stats.get("length", 0.0)))
+	_over_row("SURVIVED", "%d:%02d" % [int(t) / 60, int(t) % 60])
+	_over_row("ELIMINATIONS", str(int(stats.get("kills", 0))))
+	_over_row("RANK", "%d / %d" % [stats.get("rank", 1), stats.get("total", 1)])
+	_over_row("BEST SCORE", str(stats.get("best", 0)))
 	overlay_group.visible = true
 	_pause_panel.visible = false
 	_over_panel.visible = true
+	_reveal_panel(_over_panel)
 	if _quit_panel != null:
 		_quit_panel.visible = false
 
@@ -1224,14 +1460,33 @@ func _build_quit_confirm() -> void:
 	yes.add_theme_color_override("font_color", UiTheme.c("warn"))
 	_menu_button(v, "CANCEL", func(): show_quit_confirm(false))
 
+var _quit_return_menu := false   # dialog opened from the home menu
+var _quit_return_pause := false  # ... from the pause panel
+var _quit_return_over := false   # ... from the game-over panel
+
 func show_quit_confirm(v: bool) -> void:
 	if _quit_panel == null:
 		return
 	_quit_panel.visible = v
 	if v:
+		# remember the screen the dialog was opened from, so CANCEL can
+		# return to it exactly (menu / pause / game over)
+		_quit_return_menu = menu_group.visible
+		_quit_return_pause = _pause_panel.visible
+		_quit_return_over = _over_panel.visible
 		_pause_panel.visible = false
 		_over_panel.visible = false
 		overlay_group.visible = true
+		_reveal_panel(_quit_panel)
+		AudioMgr.play("click")
+	else:
+		# CANCEL ("No"): the panel alone used to hide, leaving overlay_group's
+		# full-screen scrim alive — an invisible input blocker that froze
+		# every touch on mobile. Restore the previous screen instead: the
+		# scrim goes away entirely unless a panel under it needs it back.
+		_pause_panel.visible = _quit_return_pause and get_tree().paused
+		_over_panel.visible = _quit_return_over
+		overlay_group.visible = _pause_panel.visible or _over_panel.visible
 		AudioMgr.play("click")
 
 # ---------------------------------------------------------------- signals (pause/gameover)
@@ -1292,9 +1547,13 @@ func _apply_menu_bleed() -> void:
 	menu_group.offset_right = _safe_insets.z
 	menu_group.offset_bottom = _safe_insets.w
 	if _menu_column != null and is_instance_valid(_menu_column):
-		_menu_column.offset_left = _menu_margin_side + _safe_insets.x
+		# Horizontal: margins only, measured from the FULL screen edge — the
+		# safe inset is NOT stacked on top of them. The 35/2/55 row needs the
+		# whole 92% band; stacking the cutout inset here pushed the right-hand
+		# box past the visible glass on devices that reserve side space.
+		_menu_column.offset_left = _menu_margin_side
 		_menu_column.offset_top = _menu_margin_top + _safe_insets.y
-		_menu_column.offset_right = -(_menu_margin_side + _safe_insets.z)
+		_menu_column.offset_right = -_menu_margin_side
 		_menu_column.offset_bottom = -(_menu_margin_bottom + _safe_insets.w)
 
 func _ui_scale() -> float:
@@ -1342,12 +1601,34 @@ func _mk_label(text: String, size: int, role_or_color: Variant, parent: Node = n
 func _nav_button(text: String) -> Button:
 	var b := Button.new()
 	b.text = text
-	b.custom_minimum_size = Vector2(56 * _ui_s, 56 * _ui_s)
+	b.custom_minimum_size = Vector2(60 * _ui_s, 60 * _ui_s)
 	_style_button(b)
-	b.add_theme_font_size_override("font_size", int(24 * _ui_s))
+	b.add_theme_font_size_override("font_size", int(28 * _ui_s))
 	b.add_theme_color_override("font_color", UiTheme.c("text"))
 	b.add_theme_color_override("font_hover_color", UiTheme.c("accent"))
 	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	# Touch devices never keyboard-navigate: dropping focus stops the void
+	# accent ring from lingering on the last-tapped arrow after a tap.
+	if _is_touch_device():
+		b.focus_mode = Control.FOCUS_NONE
+	# micro hover / press motion — same feedback language as _menu_button
+	b.pivot_offset = b.custom_minimum_size * 0.5
+	b.resized.connect(func(): b.pivot_offset = b.size * 0.5)
+	if not _is_touch_device():
+		# hover pop only where a real cursor can move away again; the
+		# emulated touch cursor would park on the arrow and keep the pop
+		b.mouse_entered.connect(func():
+			var tw := b.create_tween()
+			tw.tween_property(b, "scale", Vector2(1.05, 1.05), 0.10).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
+		b.mouse_exited.connect(func():
+			var tw := b.create_tween()
+			tw.tween_property(b, "scale", Vector2.ONE, 0.12).set_trans(Tween.TRANS_QUAD))
+	b.button_down.connect(func():
+		var tw := b.create_tween()
+		tw.tween_property(b, "scale", Vector2(0.94, 0.94), 0.06))
+	b.button_up.connect(func():
+		var tw := b.create_tween()
+		tw.tween_property(b, "scale", Vector2(1.05, 1.05), 0.10))
 	return b
 
 func _menu_button(parent: Node, text: String, on_press: Callable, primary: bool = false) -> Button:
@@ -1359,8 +1640,9 @@ func _menu_button(parent: Node, text: String, on_press: Callable, primary: bool 
 	# ~88 px on desktop; secondaries stay comfortably above the 48 px touch
 	# minimum on every display. Buttons stretch across their column.
 	var mob := _is_touch_device()
-	var row_h := (104 if primary else 82) if mob else (88 if primary else 70)
-	var fs := (34 if mob else 30) if primary else (26 if mob else 23)
+	var row_h := (104 if primary else 88) if mob else (92 if primary else 78)
+	# text-forward buttons: generous font on the same slab heights
+	var fs := (52 if mob else 46) if primary else (40 if mob else 34)
 	b.custom_minimum_size = Vector2(0, row_h * _ui_s)
 	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_style_button(b, primary)
@@ -1378,12 +1660,15 @@ func _menu_button(parent: Node, text: String, on_press: Callable, primary: bool 
 	b.pivot_offset = b.custom_minimum_size * 0.5
 	b.resized.connect(func(): b.pivot_offset = b.size * 0.5)
 	# micro hover / press motion (spec §5/§9)
-	b.mouse_entered.connect(func():
-		var tw := b.create_tween()
-		tw.tween_property(b, "scale", Vector2(1.03, 1.03), 0.10).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
-	b.mouse_exited.connect(func():
-		var tw := b.create_tween()
-		tw.tween_property(b, "scale", Vector2.ONE, 0.12).set_trans(Tween.TRANS_QUAD))
+	if not _is_touch_device():
+		# hover pop only where a real cursor can move away again; on touch
+		# the emulated cursor would park on the button and keep the pop
+		b.mouse_entered.connect(func():
+			var tw := b.create_tween()
+			tw.tween_property(b, "scale", Vector2(1.03, 1.03), 0.10).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
+		b.mouse_exited.connect(func():
+			var tw := b.create_tween()
+			tw.tween_property(b, "scale", Vector2.ONE, 0.12).set_trans(Tween.TRANS_QUAD))
 	b.button_down.connect(func():
 		var tw := b.create_tween()
 		tw.tween_property(b, "scale", Vector2(0.96, 0.96), 0.06))
@@ -1396,8 +1681,8 @@ func _option_button(parent: Node, text: String, group: String, value: int, on_pr
 	# settings/title selector button; tapping ALWAYS selects THIS value (never
 	# a toggle) and the active one is marked with a pulsing check (spec §1)
 	var b := _menu_button(parent, text, on_press)
-	b.custom_minimum_size = Vector2((190 if _is_touch_device() else 172) * _ui_s, (58 if _is_touch_device() else 50) * _ui_s)
-	b.add_theme_font_size_override("font_size", int(17 * _ui_s))
+	b.custom_minimum_size = Vector2((190 if _is_touch_device() else 172) * _ui_s, (64 if _is_touch_device() else 56) * _ui_s)
+	b.add_theme_font_size_override("font_size", int(26 * _ui_s))
 	b.set_meta("opt_group", group)
 	b.set_meta("opt_value", value)
 	b.set_meta("opt_text", text)
@@ -1429,9 +1714,11 @@ func _refresh_options() -> void:
 		hover.bg_color = accent.lightened(0.10) if sel else UiTheme.c("btn_hover_bg")
 		_add_sheen(b)
 		b.add_theme_stylebox_override("normal", normal)
-		b.add_theme_stylebox_override("hover", hover)
+		if not _is_touch_device():
+			# hover lift only where a real cursor can move away again
+			b.add_theme_stylebox_override("hover", hover)
 		b.add_theme_stylebox_override("pressed", hover)
-		b.add_theme_stylebox_override("focus", hover)
+		b.add_theme_stylebox_override("focus", normal)
 		b.add_theme_color_override("font_color", UiTheme.c("panel_bg") if sel else UiTheme.c("text"))
 		b.add_theme_color_override("font_hover_color", UiTheme.c("panel_bg") if sel else UiTheme.c("accent"))
 		b.add_theme_color_override("font_pressed_color", UiTheme.c("panel_bg") if sel else UiTheme.c("accent"))
@@ -1478,6 +1765,11 @@ func _style_button(b: Control, primary: bool = false) -> void:
 	if b is Button:
 		var dis: StyleBoxFlat = make.call(UiTheme.with_alpha("btn_bg", 0.42), UiTheme.c("panel_edge"), Color(0, 0, 0, 0.0), 0, 0)
 		(b as Button).add_theme_stylebox_override("disabled", dis)
+	if _is_touch_device():
+		# Emulated mouse lingers on the last touch, so the hover accent ring
+		# and lift never clear on mobile. Touch feedback = press state only.
+		b.add_theme_stylebox_override("hover", b.get_theme_stylebox("normal"))
+		b.add_theme_stylebox_override("focus", b.get_theme_stylebox("normal"))
 	_add_sheen(b)
 	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	if b is Button and not _tb.has(b):
@@ -1618,7 +1910,6 @@ func apply_theme(id: int) -> void:
 	_rebuild_menu_scrim()
 	_refresh_options()
 	_refresh_arena_chrome()
-	_refresh_theme_chrome()
 	_refresh_skin_buttons()
 	if _menu_title != null and is_instance_valid(_menu_title):
 		_menu_title.add_theme_color_override("font_shadow_color", UiTheme.c("title_shadow"))
@@ -1640,6 +1931,11 @@ func _panel_style(alpha: float = 0.7) -> StyleBoxFlat:
 	sb.set_meta("alpha", alpha)
 	sb.set_border_width_all(1)
 	sb.set_corner_radius_all(10)
+	# elevation: a soft drop shadow lifts every panel off the scene behind it
+	# (menus, pause, game-over, dialogs all read as one consistent material)
+	sb.shadow_color = Color(0, 0, 0, 0.30)
+	sb.shadow_size = 10
+	sb.shadow_offset = Vector2(0, 4)
 	sb.content_margin_left = 18 * _ui_s
 	sb.content_margin_right = 18 * _ui_s
 	sb.content_margin_top = 12 * _ui_s
